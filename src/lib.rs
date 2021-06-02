@@ -1,31 +1,62 @@
 #![no_std]
 
-use core::borrow::BorrowMut;
-use core::mem;
-use core::slice;
+extern crate defmt_rtt;
+pub use bbqueue::{
+    consts::*,
+};
+use bbqueue::{
+    BBBuffer,
+    Consumer,
+    Error,
+    Producer,
+};
 use usb_device::class_prelude::*;
 use usb_device::Result;
 use usbd_serial::{
-    // buffer::{
-    //     Buffer,
-    //     DefaultBufferStore,
-    // },
     CdcAcmClass,
     // cdc_acm::*,
     LineCoding,
 };
 
-/// USB (CDC-ACM) serial port with built-in buffering to implement stream-like behavior.
+// struct UsbContext{
+
+// }
+
+// struct UartContext{
+
+// }
+
+/// TX and RX buffers used by the SerialPort
 ///
-/// The RS and WS type arguments specify the storage for the read/write buffers, respectively. By
-/// default an internal 128 byte buffer is used for both directions.
-pub struct SerialPort<'a, B>
+/// Due to the BBQueue API, combined with Rust's rules about structs that
+/// contain references to other members in the struct, we need a separate struct
+/// to contain the BBQueue storage.  This structure should never be moved in
+/// memory once it's in use, because any outstanding grant from before the move
+/// would point to memory which is no longer inside the buffer.
+pub struct SerialPortStorage {
+    /// For data from the UART to the USB; from the DCE to DTE, device to host
+    rx_buffer: BBBuffer<U256>,
+    /// Other direction from `rx_buffer`
+    tx_buffer: BBBuffer<U256>,
+}
+
+impl SerialPortStorage {
+    pub fn new() -> Self {
+        Self {
+            rx_buffer: BBBuffer::new(),
+            tx_buffer: BBBuffer::new(),
+        }
+    }
+}
+
+/// A USB CDC to hardware UART serial port
+pub struct SerialPort<'a, B, const ENDPOINT_SIZE: usize>
 where
-    B: UsbBus,
+B: UsbBus,
 {
     inner: CdcAcmClass<'a, B>,
-    // read_buf: Buffer<RS>,
-    // write_buf: Buffer<WS>,
+    rx_consumer: Consumer<'a, U256>,
+    tx_producer: Producer<'a, U256>,
     write_state: WriteState,
 }
 
@@ -35,11 +66,8 @@ const SHORT_PACKET_INTERVAL: usize = 10;
 
 /// Keeps track of the type of the last written packet.
 enum WriteState {
-    /// No packets in-flight
-    Idle,
-
-    /// Short packet currently in-flight
-    Short,
+    /// The last packet written wasn't a full packet
+    NotFull,
 
     /// Full packet current in-flight. A full packet must be followed by a short packet for the host
     /// OS to see the transaction. The data is the number of subsequent full packets sent so far. A
@@ -48,161 +76,113 @@ enum WriteState {
     Full(usize),
 }
 
-impl<B> SerialPort<'_, B>
+impl<'a, B, const ENDPOINT_SIZE: usize> SerialPort<'a, B, ENDPOINT_SIZE>
 where
     B: UsbBus
 {
-    /// Creates a new USB serial port with the provided UsbBus and 128 byte read/write buffers.
-    pub fn new(alloc: &UsbBusAllocator<B>)
-        -> SerialPort<'_, B>
+    /// Creates a new USB serial port
+    pub fn new(alloc: &'a UsbBusAllocator<B>, storage: &'a SerialPortStorage) -> Self
     {
-        SerialPort::new_with_store(alloc)
-    }
-}
+        // let (mut _rx_producer, mut rx_consumer) = storage.rx_buffer.try_split().unwrap();
+        let (mut tx_producer, mut rx_consumer) = storage.tx_buffer.try_split().unwrap();
 
-impl<B> SerialPort<'_, B>
-where
-    B: UsbBus,
-{
-    /// Creates a new USB serial port with the provided UsbBus and buffer backing stores.
-    pub fn new_with_store(alloc: &UsbBusAllocator<B>)
-        -> SerialPort<'_, B>
-    {
-        SerialPort {
-            inner: CdcAcmClass::new(alloc, 64),
-            // read_buf: Buffer::new(read_store),
-            // write_buf: Buffer::new(write_store),
-            write_state: WriteState::Idle,
+        // TODO something useful with the UART side of the queues
+        
+        Self {
+            inner: CdcAcmClass::new(alloc, ENDPOINT_SIZE as u16),
+            rx_consumer,
+            tx_producer,
+            write_state: WriteState::NotFull,
         }
     }
 
-    /// Gets the current line coding.
-    pub fn line_coding(&self) -> &LineCoding { self.inner.line_coding() }
+    // / Gets the current line coding.
+    // pub fn line_coding(&self) -> &LineCoding { self.inner.line_coding() }
 
-    /// Gets the DTR (data terminal ready) state
-    pub fn dtr(&self) -> bool { self.inner.dtr() }
+    // / Gets the DTR (data terminal ready) state
+    // pub fn dtr(&self) -> bool { self.inner.dtr() }
 
-    /// Gets the RTS (request to send) state
-    pub fn rts(&self) -> bool { self.inner.rts() }
+    // / Gets the RTS (request to send) state
+    // pub fn rts(&self) -> bool { self.inner.rts() }
 
-    /// Writes bytes from `data` into the port and returns the number of bytes written.
-    ///
-    /// # Errors
-    ///
-    /// * [`WouldBlock`](usb_device::UsbError::WouldBlock) - No bytes could be written because the
-    ///   buffers are full.
-    ///
-    /// Other errors from `usb-device` may also be propagated.
-    pub fn write(&mut self, data: &[u8]) -> Result<usize> {
-        // let count = self.write_buf.write(data);
+    fn flush(&mut self) {
+        match self.rx_consumer.read() {
+            // There is more data to write
+            Ok(grant) => {
+                // Deciding what to write is a bit more complicated, due to the way USB
+                // bulk transfers work...
+                let full_packet_count = match self.write_state {
+                    WriteState::Full(c) => c,
+                    WriteState::NotFull => 0,
+                };
 
-        // match self.flush() {
-        //     Ok(_) | Err(UsbError::WouldBlock) => { },
-        //     Err(err) => { return Err(err); },
-        // };
+                let max_write_size = if full_packet_count >= SHORT_PACKET_INTERVAL {
+                    ENDPOINT_SIZE-1
+                } else {
+                    ENDPOINT_SIZE
+                };
 
-        // if count == 0 {
-        //     Err(UsbError::WouldBlock)
-        // } else {
-        //     Ok(count)
-        // }
-        Ok(0)
-    }
+                let write_slice = if grant.buf().len() > max_write_size {
+                    grant.buf().split_at(max_write_size).0
+                } else {
+                    grant.buf()
+                };
 
-    /// Reads bytes from the port into `data` and returns the number of bytes read.
-    ///
-    /// # Errors
-    ///
-    /// * [`WouldBlock`](usb_device::UsbError::WouldBlock) - No bytes available for reading.
-    ///
-    /// Other errors from `usb-device` may also be propagated.
-    pub fn read(&mut self, data: &mut [u8]) -> Result<usize> {
-        // let buf = &mut self.read_buf;
-        // let inner = &mut self.inner;
+                match self.inner.write_packet(write_slice) {
+                    Ok(count) => {
+                        // TODO it would be nice to release only after we get
+                        // the endpoint_in_complete() callback, so we're sure
+                        // the data was read by the host.
+                        grant.release(count);
 
-        // // Try to read a packet from the endpoint and write it into the buffer if it fits. Propagate
-        // // errors except `WouldBlock`.
+                        self.write_state = if count >= ENDPOINT_SIZE {
+                            WriteState::Full(full_packet_count + 1)
+                        } else {
+                            WriteState::NotFull
+                        };
+                        // Ok(())
+                    }
 
-        // buf.write_all(inner.max_packet_size() as usize, |buf_data| {
-        //     match inner.read_packet(buf_data) {
-        //         Ok(c) => Ok(c),
-        //         Err(UsbError::WouldBlock) => Ok(0),
-        //         Err(err) => Err(err),
-        //     }
-        // })?;
+                    Err(UsbError::WouldBlock) => {}
 
-        // if buf.available_read() == 0 {
-        //     // No data available for reading.
-        //     return Err(UsbError::WouldBlock);
-        // }
+                    Err(_) => {
+                        defmt::error!("Error writing packet")
+                        // Err(e)
+                    }
+                }
+            }
 
-        // let r = buf.read(data.len(), |buf_data| {
-        //     &data[..buf_data.len()].copy_from_slice(buf_data);
+            // No more data to write
+            Err(Error::InsufficientSize) => {
+                if let WriteState::Full(_) = self.write_state {
+                    // Need to send a Zero Length Packet to
+                    // signal the end of a transaction
+                    match self.inner.write_packet(&[]) {
+                        Ok(_) => {
+                            self.write_state = WriteState::NotFull;
+                        }
+                        Err(UsbError::WouldBlock) => {}
+                        Err(_) => {
+                            defmt::error!("Error writing ZLP")
+                        }
+                    }
+                } else {
+                    self.write_state = WriteState::NotFull;
+                }
 
-        //     Ok(buf_data.len())
-        // });
+                // Ok(())
+            }
 
-        // r
-        Ok(0)
-    }
-
-    /// Sends as much as possible of the current write buffer. Returns `Ok` if all data that has
-    /// been written has been completely written to hardware buffers `Err(WouldBlock)` if there is
-    /// still data remaining, and other errors if there's an error sending data to the host. Note
-    /// that even if this method returns `Ok`, data may still be in hardware buffers on either side.
-    pub fn flush(&mut self) -> Result<()> {
-        // let buf = &mut self.write_buf;
-        // let inner = &mut self.inner;
-        // let write_state = &mut self.write_state;
-
-        // let full_count = match *write_state {
-        //     WriteState::Full(c) => c,
-        //     _ => 0,
-        // };
-
-        // if buf.available_read() > 0 {
-        //     // There's data in the write_buf, so try to write that first.
-
-        //     let max_write_size = if full_count >= SHORT_PACKET_INTERVAL {
-        //         inner.max_packet_size() - 1
-        //     } else {
-        //         inner.max_packet_size()
-        //     } as usize;
-
-        //     buf.read(max_write_size, |buf_data| {
-        //         // This may return WouldBlock which will be propagated.
-        //         inner.write_packet(buf_data)?;
-
-        //         *write_state = if buf_data.len() == inner.max_packet_size() as usize {
-        //             WriteState::Full(full_count + 1)
-        //         } else {
-        //             WriteState::Short
-        //         };
-
-        //         Ok(buf_data.len())
-        //     })?;
-
-        //     Err(UsbError::WouldBlock)
-        // } else if full_count != 0 {
-        //     // Write a ZLP to complete the transaction if there's nothing else to write and the last
-        //     // packet was a full one. This may return WouldBlock which will be propagated.
-        //     inner.write_packet(&[])?;
-
-        //     *write_state = WriteState::Short;
-
-        //     Err(UsbError::WouldBlock)
-        // } else {
-        //     // No data left in writer_buf.
-
-        //     *write_state = WriteState::Idle;
-
-        //     Ok(())
-        // }
-        Ok(())
+            Err(_) => {
+                // TODO handle this better
+                defmt::error!("Couldn't get RX grant");
+                // Ok(())
+            }
+        }
     }
 }
 
-impl<B> UsbClass<B> for SerialPort<'_, B>
+impl<B, const ENDPOINT_SIZE: usize> UsbClass<B> for SerialPort<'_, B, ENDPOINT_SIZE>
 where
     B: UsbBus,
 {
@@ -212,18 +192,51 @@ where
 
     fn reset(&mut self) {
         self.inner.reset();
+        // TODO
         // self.read_buf.clear();
         // self.write_buf.clear();
-        self.write_state = WriteState::Idle;
+        self.write_state = WriteState::NotFull;
+    }
+
+    fn poll(&mut self) {
+        // See if the host has more data to send over the UART
+        match self.tx_producer.grant_exact(ENDPOINT_SIZE) {
+            Ok(mut grant) => {
+                match self.inner.read_packet(grant.buf()) {
+                    Ok(count) => {
+                        grant.commit(count);
+                    }
+                    Err(UsbError::WouldBlock) => {
+                        // No data to read, just drop the grant
+                    },
+                    Err(_) => {
+                        // TODO handle this better
+                        defmt::error!("Error reading TX data");
+                    }
+                };
+            }
+            Err(_) => {
+                // TODO handle this better
+                defmt::error!("Couldn't get TX grant");
+            }
+        }
+
+        self.flush();
     }
 
     fn endpoint_in_complete(&mut self, addr: EndpointAddress) {
+        defmt::warn!("TODO write complete, addr {:?}", u8::from(addr));
+        self.flush();
         // if addr == self.inner.write_ep_address() {
         //     self.flush().ok();
         // }
     }
 
-    fn control_in(&mut self, xfer: ControlIn<B>) { self.inner.control_in(xfer); }
+    fn control_in(&mut self, xfer: ControlIn<B>) {
+        self.inner.control_in(xfer);
+    }
 
-    fn control_out(&mut self, xfer: ControlOut<B>) { self.inner.control_out(xfer); }
+    fn control_out(&mut self, xfer: ControlOut<B>) {
+        self.inner.control_out(xfer);
+    }
 }
