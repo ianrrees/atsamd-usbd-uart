@@ -3,13 +3,25 @@
 extern crate defmt_rtt;
 extern crate atsamd_hal;
 
-// use atsamd_hal::hal::serial; // embedded_hal serial traits
-use atsamd_hal::sercom::v2::uart::AnyUart;
+use atsamd_hal::hal::serial::Write; // embedded_hal serial traits
+use atsamd_hal::{
+    sercom::v2::uart::{
+        self,
+        Enable,
+        Rx,
+        Tx,
+        TxOrRx,
+        UartRx,
+        UartTx,
+    },
+    time::Hertz,
+};
 
 // TODO use const generics, so our customers don't need to see this
 pub use bbqueue::{
     consts::*,
 };
+// See note in Cargo.toml as to why this not heapless
 use bbqueue::{
     BBBuffer,
     Consumer,
@@ -69,10 +81,11 @@ impl SerialPortStorage {
 }
 
 /// A USB CDC to hardware UART serial port
-pub struct SerialPort<'a, B, U, const ENDPOINT_SIZE: usize>
+pub struct SerialPort<'a, B, C, const ENDPOINT_SIZE: usize>
 where
     B: UsbBus,
-    U: AnyUart,
+    C: uart::ValidConfig,
+    C::Pads: Rx + Tx + TxOrRx,
 {
     comm_if: InterfaceNumber,
     comm_ep: EndpointIn<'a, B>,
@@ -85,8 +98,10 @@ where
 
     rx_consumer: Consumer<'a, U256>,
     tx_producer: Producer<'a, U256>,
+
     write_state: WriteState,
-    uart_hardware: U,
+    uart_rx: UartRx<C>,
+    uart_tx: UartTx<C>,
 
     /// Whether we're waiting on a transmit complete callback from the UART
     ///
@@ -111,20 +126,23 @@ enum WriteState {
     Full(usize),
 }
 
-impl<'a, B, U, const ENDPOINT_SIZE: usize> SerialPort<'a, B, U, ENDPOINT_SIZE>
+impl<'a, B, C, const ENDPOINT_SIZE: usize> SerialPort<'a, B, C, ENDPOINT_SIZE>
 where
     B: UsbBus,
-    U: AnyUart,
+    C: uart::ValidConfig,
+    C::Pads: Rx + Tx + TxOrRx,
 {
     /// Creates a new USB serial port
     // TODO make the uart generic
-    pub fn new(alloc: &'a UsbBusAllocator<B>, storage: &'a SerialPortStorage, uart_hardware: U) -> Self
+    pub fn new(alloc: &'a UsbBusAllocator<B>, storage: &'a SerialPortStorage, uart_hardware: C) -> Self
     {
-        // let (mut _rx_producer, mut rx_consumer) = storage.rx_buffer.try_split().unwrap();
-        let (mut tx_producer, mut rx_consumer) = storage.tx_buffer.try_split().unwrap();
+        let (mut rx_producer, mut rx_consumer) = storage.rx_buffer.try_split().unwrap();
+        let (mut tx_producer, mut tx_consumer) = storage.tx_buffer.try_split().unwrap();
 
-        // TODO something useful with the UART side of the queues
-        
+        let (uart_rx, uart_tx) = uart_hardware
+            // .baud(Hertz(115200), uart::BaudMode::Arithmetic(uart::Oversampling::Bits16))
+            .enable();
+
         Self {
             comm_if: alloc.interface(),
             comm_ep: alloc.interrupt(8, 255),
@@ -143,7 +161,8 @@ where
             rx_consumer,
             tx_producer,
             write_state: WriteState::NotFull,
-            uart_hardware,
+            uart_rx,
+            uart_tx,
             tx_active: Mutex::new(Cell::new(false)),
         }
     }
@@ -227,7 +246,13 @@ where
 
     // TODO perhaps a better name
     fn flush_uart(&mut self) {
-
+        // match self.uart_tx.write(42u8) { // +
+        //     Ok(()) => {}
+        //     Err(_) => {
+        //         defmt::error!("error in flush_uart()"); // TODO
+        //     }
+        // };
+        
     }
 
     pub fn uart_callback(&mut self) {
@@ -242,10 +267,11 @@ where
     }
 }
 
-impl<B, U, const ENDPOINT_SIZE: usize> UsbClass<B> for SerialPort<'_, B, U, ENDPOINT_SIZE>
+impl<B, C, const ENDPOINT_SIZE: usize> UsbClass<B> for SerialPort<'_, B, C, ENDPOINT_SIZE>
 where
     B: UsbBus,
-    U: AnyUart,
+    C: uart::ValidConfig,
+    C::Pads: Rx + Tx + TxOrRx,
 {
     fn get_configuration_descriptors(&self, writer: &mut DescriptorWriter) -> Result<()> {
         writer.iad(
