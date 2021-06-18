@@ -1,11 +1,9 @@
 [package]
 name = "atsamd-usb-uart"
 version = "0.1.0"
-authors = ["Ian Rees <ian.rees@gmail.com>"]
+authors = ["Ian Rees <code@ianrees.nz>"]
 keywords = ["no-std", "arm", "cortex-m", "embedded-hal"]
 edition = "2018"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 # Using bbqueue because it gives a low-cost method to attempt a USB write,
