@@ -9,23 +9,24 @@ edition = "2018"
 
 [dependencies]
 # Using bbqueue because it gives a low-cost method to attempt a USB write,
-# without removing data from the structure
+# without removing data from the structure, where heapless::spsc would seem to
+# require an intermediate buffer.
 bbqueue = {version = "0.4.12", features = ["thumbv6"]}
+
+cortex-m = "~0.6"
 
 # TODO Remove defmt before publishing?
 defmt = "0.2.0"
 defmt-rtt = "0.2.0"
 
 usb-device = "0.2.7"
-usbd-serial = "0.1.1"
-nb = "0.1.2"
 
 [dependencies.atsamd-hal]
 # Under-development version
 default-features = false
 # git = "https://github.com/ianrrees/atsamd"
 # branch = "for-work"
-path = '/home/irees/Projects/20201112 - atsamd-rs/atsamd-rs/hal'
+path = '/home/irees/Projects/20201112 - atsamd-rs/hal'
 
 [features]
 default = [
