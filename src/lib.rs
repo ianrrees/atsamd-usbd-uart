@@ -3,14 +3,18 @@
 extern crate defmt_rtt;
 extern crate atsamd_hal;
 
-use atsamd_hal::hal::serial::Write; // embedded_hal serial traits
+use atsamd_hal::hal::serial::{Read, Write}; // embedded_hal serial traits
 use atsamd_hal::{
     sercom::v2::uart::{
         self,
         Enable,
         Rx,
+        RxError,
+        RxFlags,
+        RxStatus,
         Tx,
         TxOrRx,
+        Uart,
         UartRx,
         UartTx,
     },
@@ -29,12 +33,13 @@ use bbqueue::{
     Producer,
 };
 // use core::borrow::BorrowMut;
-use core::cell::Cell;
+// use core::cell::Cell;
 use core::convert::TryInto;
-use cortex_m::interrupt::{
-    self,
-    Mutex,
-};
+// use cortex_m::interrupt::{
+//     self,
+//     Mutex,
+// };
+use nb;
 use usb_device::class_prelude::*;
 use usb_device::Result;
 
@@ -84,7 +89,7 @@ impl SerialPortStorage {
 pub struct SerialPort<'a, B, C, const ENDPOINT_SIZE: usize>
 where
     B: UsbBus,
-    C: uart::ValidConfig,
+    C: uart::ValidConfig<Word = u8>,
     C::Pads: Rx + Tx + TxOrRx,
 {
     comm_if: InterfaceNumber,
@@ -96,17 +101,21 @@ where
     dtr: bool,
     rts: bool,
 
-    rx_consumer: Consumer<'a, U256>,
-    tx_producer: Producer<'a, U256>,
+    /// UART end of the UART->USB buffer
+    uart_to_usb_producer: Producer<'a, U256>,
+
+    /// USB end of the UART->USB buffer 
+    uart_to_usb_consumer: Consumer<'a, U256>,
+
+    /// USB end of the USB->UART buffer
+    usb_to_uart_producer: Producer<'a, U256>,
+
+    /// UART end of the USB->UART buffer
+    usb_to_uart_consumer: Consumer<'a, U256>,
 
     write_state: WriteState,
     uart_rx: UartRx<C>,
     uart_tx: UartTx<C>,
-
-    /// Whether we're waiting on a transmit complete callback from the UART
-    ///
-    /// This is manipulated in both USB and UART interrupt contexts.
-    tx_active: Mutex<Cell<bool>>,
 }
 
 /// If this many full size packets have been sent in a row, a short packet will
@@ -129,19 +138,23 @@ enum WriteState {
 impl<'a, B, C, const ENDPOINT_SIZE: usize> SerialPort<'a, B, C, ENDPOINT_SIZE>
 where
     B: UsbBus,
-    C: uart::ValidConfig,
+    C: uart::ValidConfig<Word = u8>,
     C::Pads: Rx + Tx + TxOrRx,
 {
     /// Creates a new USB serial port
     // TODO make the uart generic
     pub fn new(alloc: &'a UsbBusAllocator<B>, storage: &'a SerialPortStorage, uart_hardware: C) -> Self
     {
-        let (mut rx_producer, mut rx_consumer) = storage.rx_buffer.try_split().unwrap();
-        let (mut tx_producer, mut tx_consumer) = storage.tx_buffer.try_split().unwrap();
+        let (uart_to_usb_producer, uart_to_usb_consumer) = storage.rx_buffer.try_split().unwrap();
+        let (usb_to_uart_producer, usb_to_uart_consumer) = storage.tx_buffer.try_split().unwrap();
 
-        let (uart_rx, uart_tx) = uart_hardware
+        let (mut uart_rx, uart_tx) = uart_hardware
+            // TODO why doesn't this work?
             // .baud(Hertz(115200), uart::BaudMode::Arithmetic(uart::Oversampling::Bits16))
             .enable();
+
+        uart_rx.enable_interrupts(RxFlags::RXC);
+        uart_rx.flush();
 
         Self {
             comm_if: alloc.interface(),
@@ -158,18 +171,20 @@ where
             dtr: false,
             rts: false,
 
-            rx_consumer,
-            tx_producer,
+            uart_to_usb_producer,
+            uart_to_usb_consumer,
+            usb_to_uart_producer,
+            usb_to_uart_consumer,
+
             write_state: WriteState::NotFull,
             uart_rx,
             uart_tx,
-            tx_active: Mutex::new(Cell::new(false)),
         }
     }
 
     // TODO perhaps a better name
     fn flush_usb(&mut self) {
-        match self.rx_consumer.read() {
+        match self.uart_to_usb_consumer.read() {
             // There is more data to write
             Ok(grant) => {
                 // Deciding what to write is a bit more complicated,
@@ -191,6 +206,7 @@ where
                     grant.buf()
                 };
 
+                defmt::info!("Sending {:?}B over USB", write_slice.len());
                 match self.write_ep.write(write_slice) {
                     Ok(count) => {
                         // TODO it would be nice to release only after we get
@@ -238,39 +254,103 @@ where
 
             Err(_) => {
                 // TODO handle this better
-                defmt::error!("Couldn't get RX grant");
+                defmt::error!("Couldn't get uart_to_usb_consumer grant");
                 // Ok(())
             }
         }
     }
 
     // TODO perhaps a better name
+    /// Attempts to write a byte out to the UART
     fn flush_uart(&mut self) {
-        // match self.uart_tx.write(42u8) { // +
-        //     Ok(()) => {}
-        //     Err(_) => {
-        //         defmt::error!("error in flush_uart()"); // TODO
-        //     }
-        // };
+        // Try to send the next available byte
+        match self.usb_to_uart_consumer.read() {
+            Ok(grant) => {
+                // The buffer returned is guaranteed to have at least one byte
+                match self.uart_tx.write(grant.buf()[0]) { // '+'
+                    Ok(()) => {
+                        grant.release(1);
+                    }
+                    Err(uart::WouldBlock) => {
+                        // UART isn't ready for the next byte
+                    }
+                    Err(_) => {
+                        defmt::error!("error in flush_uart()"); // TODO
+                    }
+                };
+            }
+            Err(Error::InsufficientSize) => {
+                // There's no more data in the buffer to write
+            }
+            Err(_) => {
+                // TODO handle this better
+                defmt::error!("Couldn't get usb_to_uart_consumer grant");
+                // Ok(())
+            }
+        }
         
     }
 
     pub fn uart_callback(&mut self) {
-        // did we receive a byte?
-        // did we send a byte
-        if true {
+        match self.uart_to_usb_producer.grant_exact(1) {
+            Ok(mut grant) => {
+                match self.uart_rx.read() {
+                    Ok(c) => {
+                        grant.buf()[0] = c;
+                        grant.commit(1);
 
+                        // TODO This isn't at all robust...
+                        self.flush_usb();
+                    }
+                    Err(uart::WouldBlock) => {
+                        // Nothing to read here
+                        // Drop the grant without committing
+                    }
+                    Err(nb::Error::Other(error)) => {
+                        match error {
+                            RxError::ParityError => {
+                                // TODO the CDC standard probably has a way to report these
+                                defmt::error!("RX ParityError");
+                                self.uart_rx.clear_errors(RxStatus::PERR);
+                            }
+                            RxError::FrameError => {
+                                defmt::error!("RX FrameError");
+                                self.uart_rx.clear_errors(RxStatus::FERR);
+                            }
+                            RxError::Overflow => {
+                                defmt::error!("RX Overflow");
+                                self.uart_rx.clear_errors(RxStatus::BUFOVF);
+                            }
+                            RxError::InconsistentSyncField => {
+                                defmt::error!("RX InconsistentSyncField");
+                                self.uart_rx.clear_errors(RxStatus::ISF);
+                            }
+                            RxError::CollisionDetected => {
+                                defmt::error!("RX CollisionDetected");
+                                self.uart_rx.clear_errors(RxStatus::COLL);
+                            }
+                        } 
+                    }
+                }
+            }
+
+            Err(_) => {
+                // No room in the uart_to_usb buffer
+                // TODO ensure that the DTR does what it's supposed to in this case
+            }
         }
-        interrupt::free(|cs| {
-            self.tx_active.borrow(cs).replace(true);
-        });
+
+        // TODO only call flush if we sent a byte {
+        self.flush_uart();
+
+        // TODO if there's an error {
     }
 }
 
 impl<B, C, const ENDPOINT_SIZE: usize> UsbClass<B> for SerialPort<'_, B, C, ENDPOINT_SIZE>
 where
     B: UsbBus,
-    C: uart::ValidConfig,
+    C: uart::ValidConfig<Word = u8>,
     C::Pads: Rx + Tx + TxOrRx,
 {
     fn get_configuration_descriptors(&self, writer: &mut DescriptorWriter) -> Result<()> {
@@ -344,11 +424,13 @@ where
 
     fn poll(&mut self) {
         // See if the host has more data to send over the UART
-        match self.tx_producer.grant_exact(ENDPOINT_SIZE) {
+        match self.usb_to_uart_producer.grant_exact(ENDPOINT_SIZE) {
             Ok(mut grant) => {
                 match self.read_ep.read(grant.buf()) {
                     Ok(count) => {
                         grant.commit(count);
+                        // TODO note this is only reliable if the UART ISR is higher prio than USB; may be better to put that flag back...
+                        self.flush_uart(); // NOP if the UART is already busy
                     }
                     Err(UsbError::WouldBlock) => {
                         // No data to read, just drop the grant
@@ -370,11 +452,10 @@ where
     }
 
     fn endpoint_in_complete(&mut self, addr: EndpointAddress) {
-        defmt::warn!("TODO write complete, addr {:?}", u8::from(addr));
-        self.flush_usb();
-        // if addr == self.inner.write_ep_address() {
-        //     self.flush_usb().ok();
-        // }
+        defmt::info!("USB-UART endpoint_in_complete()");
+        if addr == self.write_ep.address() {
+            self.flush_usb();
+        }
     }
 
     fn control_in(&mut self, xfer: ControlIn<B>) {
@@ -387,8 +468,11 @@ where
             return;
         }
 
+        defmt::info!("USB-UART control_in()");
+
         match req.request {
             REQ_GET_LINE_CODING if req.length == 7 => {
+                defmt::info!("REQ_GET_LINE_CODING"); // TODO
                 xfer.accept(|data| {
                     data[0..4].copy_from_slice(&self.line_coding.data_rate.to_le_bytes());
                     data[4] = self.line_coding.stop_bits as u8;
@@ -396,9 +480,16 @@ where
                     data[6] = self.line_coding.data_bits;
 
                     Ok(7)
-                }).ok();
+                }).unwrap_or_else(|_|
+                    defmt::error!("USB-UART Failed to accept REQ_GET_LINE_CODING")
+                );
             },
-            _ => { xfer.reject().ok(); },
+            _ => {
+                defmt::info!("USB-UART rejecting control_in request");
+                xfer.reject().unwrap_or_else(|_|
+                    defmt::error!("USB-UART Failed to reject control IN request")
+                );
+            },
         }
     }
 
@@ -412,28 +503,48 @@ where
             return;
         }
 
+        defmt::info!("USB-UART control_out()");
+
         match req.request {
             REQ_SEND_ENCAPSULATED_COMMAND => {
+                defmt::info!("REQ_SEND_ENCAPSULATED_COMMAND"); // TODO
                 // We don't actually support encapsulated commands but pretend
                 // we do for standards compatibility.
-                xfer.accept().ok();
+                xfer.accept().unwrap_or_else(|_|
+                    defmt::error!("USB-UART Failed to accept REQ_SEND_ENCAPSULATED_COMMAND")
+                );
             },
             REQ_SET_LINE_CODING if xfer.data().len() >= 7 => {
+                defmt::info!("REQ_SET_LINE_CODING"); // TODO
                 self.line_coding.data_rate =
                     u32::from_le_bytes(xfer.data()[0..4].try_into().unwrap());
                 self.line_coding.stop_bits = xfer.data()[4].into();
                 self.line_coding.parity_type = xfer.data()[5].into();
                 self.line_coding.data_bits = xfer.data()[6];
 
-                xfer.accept().ok();
+                // TODO accept/reject based on whether we can handle the new coding
+                // TODO actually apply valid settings
+                defmt::info!("{:?} Baud", self.line_coding.data_rate);
+
+                xfer.accept().unwrap_or_else(|_|
+                    defmt::error!("USB-UART Failed to accept REQ_SET_LINE_CODING")
+                );
             },
             REQ_SET_CONTROL_LINE_STATE => {
+                defmt::info!("REQ_SET_CONTROL_LINE_STATE"); // TODO
                 self.dtr = (req.value & 0x0001) != 0;
                 self.rts = (req.value & 0x0002) != 0;
 
-                xfer.accept().ok();
+                xfer.accept().unwrap_or_else(|_|
+                    defmt::error!("USB-UART Failed to accept REQ_SET_CONTROL_LINE_STATE")
+                );
             },
-            _ => { xfer.reject().ok(); }
+            _ => {
+                defmt::info!("USB-UART rejecting control_out request");
+                xfer.reject().unwrap_or_else(|_|
+                    defmt::error!("USB-UART Failed to reject control OUT request")
+                );
+            }
         };
     }
 }
