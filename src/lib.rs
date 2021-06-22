@@ -13,6 +13,7 @@ use atsamd_hal::{
         RxFlags,
         RxStatus,
         Tx,
+        TxFlags,
         TxOrRx,
         Uart,
         UartRx,
@@ -148,13 +149,15 @@ where
         let (uart_to_usb_producer, uart_to_usb_consumer) = storage.rx_buffer.try_split().unwrap();
         let (usb_to_uart_producer, usb_to_uart_consumer) = storage.tx_buffer.try_split().unwrap();
 
-        let (mut uart_rx, uart_tx) = uart_hardware
+        let (mut uart_rx, mut uart_tx) = uart_hardware
             // TODO why doesn't this work?
             // .baud(Hertz(115200), uart::BaudMode::Arithmetic(uart::Oversampling::Bits16))
             .enable();
 
         uart_rx.enable_interrupts(RxFlags::RXC);
         uart_rx.flush();
+
+        uart_tx.enable_interrupts(TxFlags::TXC);
 
         Self {
             comm_if: alloc.interface(),
@@ -183,7 +186,7 @@ where
     }
 
     // TODO perhaps a better name
-    fn flush_usb(&mut self) {
+    pub fn flush_usb(&mut self) {
         match self.uart_to_usb_consumer.read() {
             // There is more data to write
             Ok(grant) => {
@@ -206,7 +209,6 @@ where
                     grant.buf()
                 };
 
-                defmt::info!("Sending {:?}B over USB", write_slice.len());
                 match self.write_ep.write(write_slice) {
                     Ok(count) => {
                         // TODO it would be nice to release only after we get
@@ -267,11 +269,12 @@ where
         match self.usb_to_uart_consumer.read() {
             Ok(grant) => {
                 // The buffer returned is guaranteed to have at least one byte
+                // write() clears the TXC flag if it's set
                 match self.uart_tx.write(grant.buf()[0]) { // '+'
                     Ok(()) => {
                         grant.release(1);
                     }
-                    Err(uart::WouldBlock) => {
+                    Err(nb::Error::WouldBlock) => {
                         // UART isn't ready for the next byte
                     }
                     Err(_) => {
@@ -281,16 +284,19 @@ where
             }
             Err(Error::InsufficientSize) => {
                 // There's no more data in the buffer to write
+                self.uart_tx.flush(); // Clears the TXC flag if it's set
             }
-            Err(_) => {
-                // TODO handle this better
-                defmt::error!("Couldn't get usb_to_uart_consumer grant");
-                // Ok(())
+            Err(Error::GrantInProgress) => {
+                defmt::error!("usb_to_uart_consumer.read() Error::GrantInProgress");
+                self.uart_tx.flush();
+            }
+            Err(Error::AlreadySplit) => {
+                unreachable!();
             }
         }
-        
     }
 
+    // TODO split this in to another struct so users don't need two ISRs that both reference Self
     pub fn uart_callback(&mut self) {
         match self.uart_to_usb_producer.grant_exact(1) {
             Ok(mut grant) => {
@@ -298,35 +304,32 @@ where
                     Ok(c) => {
                         grant.buf()[0] = c;
                         grant.commit(1);
-
-                        // TODO This isn't at all robust...
-                        self.flush_usb();
                     }
-                    Err(uart::WouldBlock) => {
+                    Err(nb::Error::WouldBlock) => {
                         // Nothing to read here
                         // Drop the grant without committing
                     }
                     Err(nb::Error::Other(error)) => {
                         match error {
+                            // TODO the CDC standard probably has a way to report these
                             RxError::ParityError => {
-                                // TODO the CDC standard probably has a way to report these
-                                defmt::error!("RX ParityError");
+                                defmt::error!("UART RX ParityError");
                                 self.uart_rx.clear_errors(RxStatus::PERR);
                             }
                             RxError::FrameError => {
-                                defmt::error!("RX FrameError");
+                                defmt::error!("UART RX FrameError");
                                 self.uart_rx.clear_errors(RxStatus::FERR);
                             }
                             RxError::Overflow => {
-                                defmt::error!("RX Overflow");
+                                defmt::error!("UART RX Overflow");
                                 self.uart_rx.clear_errors(RxStatus::BUFOVF);
                             }
                             RxError::InconsistentSyncField => {
-                                defmt::error!("RX InconsistentSyncField");
+                                defmt::error!("UART RX InconsistentSyncField");
                                 self.uart_rx.clear_errors(RxStatus::ISF);
                             }
                             RxError::CollisionDetected => {
-                                defmt::error!("RX CollisionDetected");
+                                defmt::error!("UART RX CollisionDetected");
                                 self.uart_rx.clear_errors(RxStatus::COLL);
                             }
                         } 
@@ -340,10 +343,7 @@ where
             }
         }
 
-        // TODO only call flush if we sent a byte {
         self.flush_uart();
-
-        // TODO if there's an error {
     }
 }
 
@@ -442,24 +442,25 @@ where
                 };
             }
             Err(_) => {
-                // TODO handle this better
-                defmt::error!("Couldn't get TX grant");
+                // TODO handle this better, but how?  Need a way to clear the interrupt flag and/or stall
+                panic!("Couldn't get usb_to_uart_producer grant");
             }
         }
 
-        // Send the host any data we've received over the UART
         self.flush_usb();
     }
 
     fn endpoint_in_complete(&mut self, addr: EndpointAddress) {
-        defmt::info!("USB-UART endpoint_in_complete()");
         if addr == self.write_ep.address() {
+            // We've written a bulk transfer out; flush in case there's more buffered data
             self.flush_usb();
         }
     }
 
     fn control_in(&mut self, xfer: ControlIn<B>) {
         let req = xfer.request();
+        defmt::info!("USB-UART control_in() type:{:?} recipient:{:?} index:{:?}",
+                     req.request_type as usize, req.recipient as usize, req.index);
 
         if !(req.request_type == control::RequestType::Class
             && req.recipient == control::Recipient::Interface
