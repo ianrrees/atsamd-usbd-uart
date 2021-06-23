@@ -3,10 +3,15 @@
 extern crate defmt_rtt;
 extern crate atsamd_hal;
 
-use atsamd_hal::hal::serial::{Read, Write}; // embedded_hal serial traits
 use atsamd_hal::{
+    prelude::*,
+    hal::serial::{
+        Read,
+        Write
+    }, // embedded_hal serial traits
     sercom::v2::uart::{
         self,
+        Disable,
         Enable,
         Rx,
         RxError,
@@ -26,13 +31,15 @@ use atsamd_hal::{
 pub use bbqueue::{
     consts::*,
 };
+
 // See note in Cargo.toml as to why this not heapless
 use bbqueue::{
     BBBuffer,
     Consumer,
-    Error,
+    Error as BBError,
     Producer,
 };
+
 // use core::borrow::BorrowMut;
 // use core::cell::Cell;
 use core::convert::TryInto;
@@ -40,15 +47,17 @@ use core::convert::TryInto;
 //     self,
 //     Mutex,
 // };
-use nb;
-use usb_device::class_prelude::*;
-use usb_device::Result;
+
+use usb_device::{
+    class_prelude::*,
+    Result,
+};
 
 /// This should be used as `device_class` when building the `UsbDevice`.
 pub const USB_CLASS_CDC: u8 = 0x02;
 
 const USB_CLASS_CDC_DATA: u8 = 0x0a;
-const CDC_SUBCLASS_ACM: u8 = 0x02;
+const CDC_SUBCLASS_ACM: u8 = 0x02; // PSTN Abstract Control Model
 const CDC_PROTOCOL_NONE: u8 = 0x00;
 
 const CS_INTERFACE: u8 = 0x24;
@@ -234,7 +243,7 @@ where
             }
 
             // No more data to write
-            Err(Error::InsufficientSize) => {
+            Err(BBError::InsufficientSize) => {
                 if let WriteState::Full(_) = self.write_state {
                     // Need to send a Zero Length Packet to
                     // signal the end of a transaction
@@ -282,15 +291,15 @@ where
                     }
                 };
             }
-            Err(Error::InsufficientSize) => {
+            Err(BBError::InsufficientSize) => {
                 // There's no more data in the buffer to write
                 self.uart_tx.flush(); // Clears the TXC flag if it's set
             }
-            Err(Error::GrantInProgress) => {
-                defmt::error!("usb_to_uart_consumer.read() Error::GrantInProgress");
-                self.uart_tx.flush();
+            Err(BBError::GrantInProgress) => {
+                // We'll hit this when the USB or UART ISR interrupts the other;
+                // it's effectively a mutex that protects the uart_tx
             }
-            Err(Error::AlreadySplit) => {
+            Err(BBError::AlreadySplit) => {
                 unreachable!();
             }
         }
@@ -442,8 +451,10 @@ where
                 };
             }
             Err(_) => {
-                // TODO handle this better, but how?  Need a way to clear the interrupt flag and/or stall
-                panic!("Couldn't get usb_to_uart_producer grant");
+                // Don't read the data out of the USB endpoint, because we don't
+                // have anywhere to put it.  The USB hardware will NAK the
+                // packet and decide whether to retry or abort the transfer.
+                self.flush_uart(); // Ensure we continue draining the buffer
             }
         }
 
@@ -517,15 +528,18 @@ where
             },
             REQ_SET_LINE_CODING if xfer.data().len() >= 7 => {
                 defmt::info!("REQ_SET_LINE_CODING"); // TODO
-                self.line_coding.data_rate =
-                    u32::from_le_bytes(xfer.data()[0..4].try_into().unwrap());
+                // TODO accept/reject based on whether we can handle the new coding
+
+                let new_baud = u32::from_le_bytes(xfer.data()[0..4].try_into().unwrap());
+                // if (new_baud != self.line_coding.data_rate) {
+                //     (self.uart_rx, self.uart_tx).reconfigure(|c|
+                //         c.baud(Hertz(new_baud), uart::BaudMode::Arithmetic(uart::Oversampling::Bits16)));
+                //     self.line_coding.data_rate = new_baud;
+                // }
+
                 self.line_coding.stop_bits = xfer.data()[4].into();
                 self.line_coding.parity_type = xfer.data()[5].into();
                 self.line_coding.data_bits = xfer.data()[6];
-
-                // TODO accept/reject based on whether we can handle the new coding
-                // TODO actually apply valid settings
-                defmt::info!("{:?} Baud", self.line_coding.data_rate);
 
                 xfer.accept().unwrap_or_else(|_|
                     defmt::error!("USB-UART Failed to accept REQ_SET_LINE_CODING")
