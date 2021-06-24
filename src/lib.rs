@@ -451,9 +451,13 @@ where
                 };
             }
             Err(_) => {
-                // Don't read the data out of the USB endpoint, because we don't
-                // have anywhere to put it.  The USB hardware will NAK the
-                // packet and decide whether to retry or abort the transfer.
+                // Since we don't have anywhere to put more data, we can't read
+                // data out of the USB endpoint.  The USB hardware will NAK
+                // transfers, and the host will decide whether to retry, until
+                // we eventually read.  In the meantime, clear interrupt flags
+                // in the USB endpoint hardware with an empty read:
+                let _ = self.read_ep.read(&mut[]);
+
                 self.flush_uart(); // Ensure we continue draining the buffer
             }
         }
