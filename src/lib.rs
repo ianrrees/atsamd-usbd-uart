@@ -11,12 +11,15 @@ use atsamd_hal::{
     },
     sercom::v2::uart::{
         self,
+        BaudMode,
         Config,
         Duplex,
         EightBit,
         Error,
         Flags,
+        Parity,
         Status,
+        StopBits,
         Uart,
         ValidPads,
     },
@@ -36,13 +39,7 @@ use bbqueue::{
     Producer,
 };
 
-// use core::borrow::BorrowMut;
-// use core::cell::Cell;
 use core::convert::TryInto;
-// use cortex_m::interrupt::{
-//     self,
-//     Mutex,
-// };
 
 use usb_device::{
     class_prelude::*,
@@ -67,6 +64,24 @@ const REQ_SET_LINE_CODING: u8 = 0x20;
 const REQ_GET_LINE_CODING: u8 = 0x21;
 const REQ_SET_CONTROL_LINE_STATE: u8 = 0x22;
 
+// TODO Only need this because we can't read settings back out of the Uart
+struct LineCoding {
+    stop_bits: StopBits,
+    parity: Option<Parity>,
+    baud: u32,
+}
+
+impl Default for LineCoding {
+    fn default() -> Self {
+        LineCoding {
+            stop_bits: StopBits::OneBit,
+            parity: None,
+            baud: 115200,
+        }
+    }
+}
+
+const BAUDMODE: BaudMode = BaudMode::Arithmetic(uart::Oversampling::Bits16);
 
 /// TX and RX buffers used by the SerialPort
 ///
@@ -103,6 +118,7 @@ where
     read_ep: EndpointOut<'a, B>,
     write_ep: EndpointIn<'a, B>,
     line_coding: LineCoding,
+    // TODO what to do about these?
     dtr: bool,
     rts: bool,
 
@@ -151,9 +167,10 @@ where
         let (uart_to_usb_producer, uart_to_usb_consumer) = storage.rx_buffer.try_split().unwrap();
         let (usb_to_uart_producer, usb_to_uart_consumer) = storage.tx_buffer.try_split().unwrap();
 
-        // TODO make a const for default data rate
         let mut uart = uart_hardware
-            .baud(Hertz(115200), uart::BaudMode::Arithmetic(uart::Oversampling::Bits16))
+            .baud(Hertz(LineCoding::default().baud), BAUDMODE)
+            .stop_bit(LineCoding::default().stop_bits)
+            .parity(LineCoding::default().parity)
             .enable();
 
         uart.enable_interrupts(Flags::RXC);
@@ -165,14 +182,7 @@ where
             data_if: alloc.interface(),
             read_ep: alloc.bulk(ENDPOINT_SIZE as u16),
             write_ep: alloc.bulk(ENDPOINT_SIZE as u16),
-            line_coding: LineCoding {
-                // TODO consts for default stop and parity configs, switch to the HAL enums
-                stop_bits: StopBits::One,
-                // TODO note we can only support 8bit at the moment
-                data_bits: 8,
-                parity_type: ParityType::None,
-                data_rate: 115200,
-            },
+            line_coding: LineCoding::default(),
             dtr: false,
             rts: false,
 
@@ -465,8 +475,6 @@ where
 
     fn control_in(&mut self, xfer: ControlIn<B>) {
         let req = xfer.request();
-        // defmt::info!("USB-UART control_in() type:{:?} recipient:{:?} index:{:?}",
-        //              req.request_type as usize, req.recipient as usize, req.index);
 
         if !(req.request_type == control::RequestType::Class
             && req.recipient == control::Recipient::Interface
@@ -477,18 +485,22 @@ where
 
         match req.request {
             REQ_GET_LINE_CODING if req.length == 7 => {
-                defmt::info!("REQ_GET_LINE_CODING"); // TODO
                 xfer.accept(|data| {
-                    data[0..4].copy_from_slice(&self.line_coding.data_rate.to_le_bytes());
+                    data[0..4].copy_from_slice(&self.line_coding.baud.to_le_bytes());
                     data[4] = self.line_coding.stop_bits as u8;
-                    data[5] = self.line_coding.parity_type as u8;
-                    data[6] = self.line_coding.data_bits;
+                    data[5] = match self.line_coding.parity {
+                        None => 0,
+                        Some(Parity::Even) => 2,
+                        Some(Parity::Odd) => 1,
+                    };
+                    data[6] = 8;
 
                     Ok(7)
                 }).unwrap_or_else(|_|
                     defmt::error!("USB-UART Failed to accept REQ_GET_LINE_CODING")
                 );
             },
+
             _ => {
                 defmt::info!("USB-UART rejecting control_in request");
                 xfer.reject().unwrap_or_else(|_|
@@ -510,33 +522,70 @@ where
 
         match req.request {
             REQ_SEND_ENCAPSULATED_COMMAND => {
-                defmt::info!("REQ_SEND_ENCAPSULATED_COMMAND"); // TODO
                 // We don't actually support encapsulated commands but pretend
                 // we do for standards compatibility.
                 xfer.accept().unwrap_or_else(|_|
                     defmt::error!("USB-UART Failed to accept REQ_SEND_ENCAPSULATED_COMMAND")
                 );
             },
+
             REQ_SET_LINE_CODING if xfer.data().len() >= 7 => {
-                defmt::info!("REQ_SET_LINE_CODING"); // TODO
-                // TODO accept/reject based on whether we can handle the new coding
-
                 let new_baud = u32::from_le_bytes(xfer.data()[0..4].try_into().unwrap());
-                defmt::warn!("TODO change baud to {:?}", new_baud);
-                // if (new_baud != self.line_coding.data_rate) {
-                //     (self.uart_rx, self.uart_tx).reconfigure(|c|
-                //         c.baud(Hertz(new_baud), uart::BaudMode::Arithmetic(uart::Oversampling::Bits16)));
-                //     self.line_coding.data_rate = new_baud;
-                // }
+                let new_stop_bits = match xfer.data()[4] {
+                    0 => Some(StopBits::OneBit),
+                    // 1 means 1.5 stop bits, unsupported by hardware
+                    2 => Some(StopBits::TwoBits),
+                    _ => None,
+                };
+                let new_parity_type = match xfer.data()[5] {
+                    0 => Some(None),
+                    1 => Some(Some(Parity::Odd)),
+                    2 => Some(Some(Parity::Even)),
+                    // 3 means Mark, unsupported by hardware
+                    // 4 means Space, unsupported by hardware
+                    _ => None,
+                };
+                let new_data_bits = xfer.data()[6];
+    
+                // TODO ensure the baud is within limits
+                if if new_stop_bits.is_none() {
+                    defmt::warn!("Rejecting unsupported stop bit request code {:?}", xfer.data()[4]);
+                    false
 
-                self.line_coding.stop_bits = xfer.data()[4].into();
-                self.line_coding.parity_type = xfer.data()[5].into();
-                self.line_coding.data_bits = xfer.data()[6];
+                } else if new_parity_type.is_none() {
+                    defmt::warn!("Rejecting unsupported parity request code {:?}", xfer.data()[5]);
+                    false
 
-                xfer.accept().unwrap_or_else(|_|
-                    defmt::error!("USB-UART Failed to accept REQ_SET_LINE_CODING")
-                );
+                } else if new_data_bits != 8 {
+                    defmt::warn!("Rejecting unsupported {:?}b line coding request", new_data_bits);
+                    false
+
+                } else {
+                    // New config is valid, so apply it
+                    // TODO split this out in to a separate method, and use that when we're reset
+                    self.uart.reconfigure(|c|
+                        c
+                        .baud(Hertz(new_baud), BAUDMODE)
+                        .stop_bit(new_stop_bits.unwrap())
+                        .parity(new_parity_type.unwrap())
+                    );
+
+                    self.line_coding.baud = new_baud;
+                    self.line_coding.stop_bits = new_stop_bits.unwrap();
+                    self.line_coding.parity = new_parity_type.unwrap();
+                    true
+
+                } {
+                    xfer.accept().unwrap_or_else(|_|
+                        defmt::error!("USB-UART Failed to accept REQ_SET_LINE_CODING")
+                    );
+                } else {
+                    xfer.reject().unwrap_or_else(|_|
+                        defmt::error!("USB-UART Failed to reject REQ_SET_LINE_CODING")
+                    );
+                }
             },
+
             REQ_SET_CONTROL_LINE_STATE => {
                 defmt::info!("REQ_SET_CONTROL_LINE_STATE"); // TODO
                 self.dtr = (req.value & 0x0001) != 0;
@@ -546,6 +595,7 @@ where
                     defmt::error!("USB-UART Failed to accept REQ_SET_CONTROL_LINE_STATE")
                 );
             },
+
             _ => {
                 defmt::info!("USB-UART rejecting control_out request");
                 xfer.reject().unwrap_or_else(|_|
@@ -553,98 +603,5 @@ where
                 );
             }
         };
-    }
-}
-
-
-/// Number of stop bits for LineCoding
-///
-/// Copied from usbd-serial
-#[derive(Copy, Clone, PartialEq, Eq)]
-pub enum StopBits {
-    /// 1 stop bit
-    One = 0,
-
-    /// 1.5 stop bits
-    OnePointFive = 1,
-
-    /// 2 stop bits
-    Two = 2,
-}
-
-impl From<u8> for StopBits {
-    fn from(value: u8) -> Self {
-        match value {
-            x if x == Self::One as u8 => Self::One,
-            x if x == Self::OnePointFive as u8 => Self::OnePointFive,
-            x if x == Self::Two as u8 => Self::Two,
-            x => {
-                defmt::error!("Unexpected stop bits integer: {:?}", x);
-                Self::One
-            }
-        }
-    }
-}
-
-/// Parity for LineCoding
-///
-/// Copied from usbd-serial
-#[derive(Copy, Clone, PartialEq, Eq)]
-pub enum ParityType {
-    None = 0,
-    Odd = 1,
-    Event = 2,
-    Mark = 3,
-    Space = 4,
-}
-
-impl From<u8> for ParityType {
-    fn from(value: u8) -> Self {
-        match value {
-            x if x == Self::None as u8 => Self::None,
-            x if x == Self::Odd as u8 => Self::Odd,
-            x if x == Self::Event as u8 => Self::Event,
-            x if x == Self::Mark as u8 => Self::Mark,
-            x if x == Self::Space as u8 => Self::Space,
-            x => {
-                defmt::error!("Unexpected parity integer: {:?}", x);
-                Self::None
-            }
-        }
-    }
-}
-
-/// Line coding parameters
-///
-/// Copied from usbd-serial
-pub struct LineCoding {
-    stop_bits: StopBits,
-    data_bits: u8,
-    parity_type: ParityType,
-    data_rate: u32,
-}
-
-impl LineCoding {
-    /// Gets the number of stop bits for UART communication.
-    pub fn stop_bits(&self) -> StopBits { self.stop_bits }
-
-    /// Gets the number of data bits for UART communication.
-    pub fn data_bits(&self) -> u8 { self.data_bits }
-
-    /// Gets the parity type for UART communication.
-    pub fn parity_type(&self) -> ParityType { self.parity_type }
-
-    /// Gets the data rate in bits per second for UART communication.
-    pub fn data_rate(&self) -> u32 { self.data_rate }
-}
-
-impl Default for LineCoding {
-    fn default() -> Self {
-        LineCoding {
-            stop_bits: StopBits::One,
-            data_bits: 8,
-            parity_type: ParityType::None,
-            data_rate: 8_000,
-        }
     }
 }
