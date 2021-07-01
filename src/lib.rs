@@ -1,50 +1,31 @@
 #![no_std]
 
-extern crate defmt_rtt;
 extern crate atsamd_hal;
+extern crate defmt_rtt;
 
 use atsamd_hal::{
-    prelude::*,
-    hal::serial::{ // embedded_hal serial traits
+    hal::serial::{
+        // embedded_hal serial traits
         Read,
-        Write
+        Write,
     },
+    prelude::*,
     sercom::v2::uart::{
-        self,
-        BaudMode,
-        Config,
-        Duplex,
-        EightBit,
-        Error,
-        Flags,
-        Parity,
-        Status,
-        StopBits,
-        Uart,
+        self, BaudMode, Config, Duplex, EightBit, Error, Flags, Parity, Status, StopBits, Uart,
         ValidPads,
     },
     time::Hertz,
 };
 
 // TODO use const generics, so our customers don't need to see this
-pub use bbqueue::{
-    consts::*,
-};
+pub use bbqueue::consts::*;
 
 // See note in Cargo.toml as to why this not heapless
-use bbqueue::{
-    BBBuffer,
-    Consumer,
-    Error as BBError,
-    Producer,
-};
+use bbqueue::{BBBuffer, Consumer, Error as BBError, Producer};
 
 use core::convert::TryInto;
 
-use usb_device::{
-    class_prelude::*,
-    Result,
-};
+use usb_device::{class_prelude::*, Result};
 
 /// This should be used as `device_class` when building the `UsbDevice`.
 pub const USB_CLASS_CDC: u8 = 0x02;
@@ -125,7 +106,7 @@ where
     /// UART end of the UART->USB buffer
     uart_to_usb_producer: Producer<'a, U256>,
 
-    /// USB end of the UART->USB buffer 
+    /// USB end of the UART->USB buffer
     uart_to_usb_consumer: Consumer<'a, U256>,
 
     /// USB end of the USB->UART buffer
@@ -162,8 +143,11 @@ where
     B: UsbBus,
     P: ValidPads<Capability = Duplex>,
 {
-    pub fn new(alloc: &'a UsbBusAllocator<B>, storage: &'a SerialPortStorage, uart_hardware: Config<P, EightBit>) -> Self
-    {
+    pub fn new(
+        alloc: &'a UsbBusAllocator<B>,
+        storage: &'a SerialPortStorage,
+        uart_hardware: Config<P, EightBit>,
+    ) -> Self {
         let (uart_to_usb_producer, uart_to_usb_consumer) = storage.rx_buffer.try_split().unwrap();
         let (usb_to_uart_producer, usb_to_uart_consumer) = storage.tx_buffer.try_split().unwrap();
 
@@ -209,7 +193,7 @@ where
                 };
 
                 let max_write_size = if full_packet_count >= SHORT_PACKET_INTERVAL {
-                    ENDPOINT_SIZE-1
+                    ENDPOINT_SIZE - 1
                 } else {
                     ENDPOINT_SIZE
                 };
@@ -281,7 +265,8 @@ where
             Ok(grant) => {
                 // The buffer returned is guaranteed to have at least one byte
                 // write() clears the TXC flag if it's set
-                match self.uart.write(grant.buf()[0]) { // '+'
+                match self.uart.write(grant.buf()[0]) {
+                    // '+'
                     Ok(()) => {
                         grant.release(1);
                     }
@@ -343,7 +328,7 @@ where
                                 defmt::error!("UART RX CollisionDetected");
                                 self.uart.clear_status(Status::COLL);
                             }
-                        } 
+                        }
                     }
                 }
             }
@@ -369,51 +354,54 @@ where
             2,
             USB_CLASS_CDC,
             CDC_SUBCLASS_ACM,
-            CDC_PROTOCOL_NONE)?;
+            CDC_PROTOCOL_NONE,
+        )?;
 
         writer.interface(
             self.comm_if,
             USB_CLASS_CDC,
             CDC_SUBCLASS_ACM,
-            CDC_PROTOCOL_NONE)?;
+            CDC_PROTOCOL_NONE,
+        )?;
 
         writer.write(
             CS_INTERFACE,
             &[
                 CDC_TYPE_HEADER, // bDescriptorSubtype
-                0x10, 0x01 // bcdCDC (1.10)
-            ])?;
+                0x10,
+                0x01, // bcdCDC (1.10)
+            ],
+        )?;
 
         writer.write(
             CS_INTERFACE,
             &[
                 CDC_TYPE_ACM, // bDescriptorSubtype
-                0x00 // bmCapabilities
-            ])?;
+                0x00,         // bmCapabilities
+            ],
+        )?;
 
         writer.write(
             CS_INTERFACE,
             &[
-                CDC_TYPE_UNION, // bDescriptorSubtype
+                CDC_TYPE_UNION,      // bDescriptorSubtype
                 self.comm_if.into(), // bControlInterface
-                self.data_if.into() // bSubordinateInterface
-            ])?;
+                self.data_if.into(), // bSubordinateInterface
+            ],
+        )?;
 
         writer.write(
             CS_INTERFACE,
             &[
                 CDC_TYPE_CALL_MANAGEMENT, // bDescriptorSubtype
-                0x00, // bmCapabilities
-                self.data_if.into() // bDataInterface
-            ])?;
+                0x00,                     // bmCapabilities
+                self.data_if.into(),      // bDataInterface
+            ],
+        )?;
 
         writer.endpoint(&self.comm_ep)?;
 
-        writer.interface(
-            self.data_if,
-            USB_CLASS_CDC_DATA,
-            0x00,
-            0x00)?;
+        writer.interface(self.data_if, USB_CLASS_CDC_DATA, 0x00, 0x00)?;
 
         writer.endpoint(&self.write_ep)?;
         writer.endpoint(&self.read_ep)?;
@@ -444,7 +432,7 @@ where
                     }
                     Err(UsbError::WouldBlock) => {
                         // No data to read, just drop the grant
-                    },
+                    }
                     Err(_) => {
                         // TODO handle this better
                         defmt::error!("Error reading TX data");
@@ -457,7 +445,7 @@ where
                 // transfers, and the host will decide whether to retry, until
                 // we eventually read.  In the meantime, clear interrupt flags
                 // in the USB endpoint hardware with an empty read:
-                let _ = self.read_ep.read(&mut[]);
+                let _ = self.read_ep.read(&mut []);
 
                 self.flush_uart(); // Ensure we continue draining the buffer
             }
@@ -496,17 +484,16 @@ where
                     data[6] = 8;
 
                     Ok(7)
-                }).unwrap_or_else(|_|
-                    defmt::error!("USB-UART Failed to accept REQ_GET_LINE_CODING")
-                );
-            },
+                })
+                .unwrap_or_else(|_| defmt::error!("USB-UART Failed to accept REQ_GET_LINE_CODING"));
+            }
 
             _ => {
                 defmt::info!("USB-UART rejecting control_in request");
-                xfer.reject().unwrap_or_else(|_|
+                xfer.reject().unwrap_or_else(|_| {
                     defmt::error!("USB-UART Failed to reject control IN request")
-                );
-            },
+                });
+            }
         }
     }
 
@@ -524,10 +511,10 @@ where
             REQ_SEND_ENCAPSULATED_COMMAND => {
                 // We don't actually support encapsulated commands but pretend
                 // we do for standards compatibility.
-                xfer.accept().unwrap_or_else(|_|
+                xfer.accept().unwrap_or_else(|_| {
                     defmt::error!("USB-UART Failed to accept REQ_SEND_ENCAPSULATED_COMMAND")
-                );
-            },
+                });
+            }
 
             REQ_SET_LINE_CODING if xfer.data().len() >= 7 => {
                 let new_baud = u32::from_le_bytes(xfer.data()[0..4].try_into().unwrap());
@@ -546,61 +533,65 @@ where
                     _ => None,
                 };
                 let new_data_bits = xfer.data()[6];
-    
+
                 // TODO ensure the baud is within limits
                 if if new_stop_bits.is_none() {
-                    defmt::warn!("Rejecting unsupported stop bit request code {:?}", xfer.data()[4]);
+                    defmt::warn!(
+                        "Rejecting unsupported stop bit request code {:?}",
+                        xfer.data()[4]
+                    );
                     false
-
                 } else if new_parity_type.is_none() {
-                    defmt::warn!("Rejecting unsupported parity request code {:?}", xfer.data()[5]);
+                    defmt::warn!(
+                        "Rejecting unsupported parity request code {:?}",
+                        xfer.data()[5]
+                    );
                     false
-
                 } else if new_data_bits != 8 {
-                    defmt::warn!("Rejecting unsupported {:?}b line coding request", new_data_bits);
+                    defmt::warn!(
+                        "Rejecting unsupported {:?}b line coding request",
+                        new_data_bits
+                    );
                     false
-
                 } else {
                     // New config is valid, so apply it
                     // TODO split this out in to a separate method, and use that when we're reset
-                    self.uart.reconfigure(|c|
-                        c
-                        .baud(Hertz(new_baud), BAUDMODE)
-                        .stop_bit(new_stop_bits.unwrap())
-                        .parity(new_parity_type.unwrap())
-                    );
+                    self.uart.reconfigure(|c| {
+                        c.baud(Hertz(new_baud), BAUDMODE)
+                            .stop_bit(new_stop_bits.unwrap())
+                            .parity(new_parity_type.unwrap())
+                    });
 
                     self.line_coding.baud = new_baud;
                     self.line_coding.stop_bits = new_stop_bits.unwrap();
                     self.line_coding.parity = new_parity_type.unwrap();
                     true
-
                 } {
-                    xfer.accept().unwrap_or_else(|_|
+                    xfer.accept().unwrap_or_else(|_| {
                         defmt::error!("USB-UART Failed to accept REQ_SET_LINE_CODING")
-                    );
+                    });
                 } else {
-                    xfer.reject().unwrap_or_else(|_|
+                    xfer.reject().unwrap_or_else(|_| {
                         defmt::error!("USB-UART Failed to reject REQ_SET_LINE_CODING")
-                    );
+                    });
                 }
-            },
+            }
 
             REQ_SET_CONTROL_LINE_STATE => {
                 defmt::info!("REQ_SET_CONTROL_LINE_STATE"); // TODO
                 self.dtr = (req.value & 0x0001) != 0;
                 self.rts = (req.value & 0x0002) != 0;
 
-                xfer.accept().unwrap_or_else(|_|
+                xfer.accept().unwrap_or_else(|_| {
                     defmt::error!("USB-UART Failed to accept REQ_SET_CONTROL_LINE_STATE")
-                );
-            },
+                });
+            }
 
             _ => {
                 defmt::info!("USB-UART rejecting control_out request");
-                xfer.reject().unwrap_or_else(|_|
+                xfer.reject().unwrap_or_else(|_| {
                     defmt::error!("USB-UART Failed to reject control OUT request")
-                );
+                });
             }
         };
     }
