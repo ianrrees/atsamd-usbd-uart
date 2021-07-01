@@ -5,24 +5,20 @@ extern crate atsamd_hal;
 
 use atsamd_hal::{
     prelude::*,
-    hal::serial::{
+    hal::serial::{ // embedded_hal serial traits
         Read,
         Write
-    }, // embedded_hal serial traits
+    },
     sercom::v2::uart::{
         self,
-        Disable,
-        Enable,
-        Rx,
-        RxError,
-        RxFlags,
-        RxStatus,
-        Tx,
-        TxFlags,
-        TxOrRx,
+        Config,
+        Duplex,
+        EightBit,
+        Error,
+        Flags,
+        Status,
         Uart,
-        UartRx,
-        UartTx,
+        ValidPads,
     },
     time::Hertz,
 };
@@ -96,11 +92,10 @@ impl SerialPortStorage {
 }
 
 /// A USB CDC to hardware UART serial port
-pub struct SerialPort<'a, B, C, const ENDPOINT_SIZE: usize>
+pub struct SerialPort<'a, B, P, const ENDPOINT_SIZE: usize>
 where
     B: UsbBus,
-    C: uart::ValidConfig<Word = u8>,
-    C::Pads: Rx + Tx + TxOrRx,
+    P: ValidPads<Capability = Duplex>,
 {
     comm_if: InterfaceNumber,
     comm_ep: EndpointIn<'a, B>,
@@ -124,8 +119,9 @@ where
     usb_to_uart_consumer: Consumer<'a, U256>,
 
     write_state: WriteState,
-    uart_rx: UartRx<C>,
-    uart_tx: UartTx<C>,
+
+    /// The enabled UART hardware
+    uart: Uart<Config<P, EightBit>, Duplex>,
 }
 
 /// If this many full size packets have been sent in a row, a short packet will
@@ -145,28 +141,23 @@ enum WriteState {
     Full(usize),
 }
 
-impl<'a, B, C, const ENDPOINT_SIZE: usize> SerialPort<'a, B, C, ENDPOINT_SIZE>
+impl<'a, B, P, const ENDPOINT_SIZE: usize> SerialPort<'a, B, P, ENDPOINT_SIZE>
 where
     B: UsbBus,
-    C: uart::ValidConfig<Word = u8>,
-    C::Pads: Rx + Tx + TxOrRx,
+    P: ValidPads<Capability = Duplex>,
 {
-    /// Creates a new USB serial port
-    // TODO make the uart generic
-    pub fn new(alloc: &'a UsbBusAllocator<B>, storage: &'a SerialPortStorage, uart_hardware: C) -> Self
+    pub fn new(alloc: &'a UsbBusAllocator<B>, storage: &'a SerialPortStorage, uart_hardware: Config<P, EightBit>) -> Self
     {
         let (uart_to_usb_producer, uart_to_usb_consumer) = storage.rx_buffer.try_split().unwrap();
         let (usb_to_uart_producer, usb_to_uart_consumer) = storage.tx_buffer.try_split().unwrap();
 
-        let (mut uart_rx, mut uart_tx) = uart_hardware
-            // TODO why doesn't this work?
-            // .baud(Hertz(115200), uart::BaudMode::Arithmetic(uart::Oversampling::Bits16))
+        // TODO make a const for default data rate
+        let mut uart = uart_hardware
+            .baud(Hertz(115200), uart::BaudMode::Arithmetic(uart::Oversampling::Bits16))
             .enable();
 
-        uart_rx.enable_interrupts(RxFlags::RXC);
-        uart_rx.flush();
-
-        uart_tx.enable_interrupts(TxFlags::TXC);
+        uart.enable_interrupts(Flags::RXC);
+        uart.enable_interrupts(Flags::TXC);
 
         Self {
             comm_if: alloc.interface(),
@@ -175,10 +166,12 @@ where
             read_ep: alloc.bulk(ENDPOINT_SIZE as u16),
             write_ep: alloc.bulk(ENDPOINT_SIZE as u16),
             line_coding: LineCoding {
+                // TODO consts for default stop and parity configs, switch to the HAL enums
                 stop_bits: StopBits::One,
+                // TODO note we can only support 8bit at the moment
                 data_bits: 8,
                 parity_type: ParityType::None,
-                data_rate: 8_000,
+                data_rate: 115200,
             },
             dtr: false,
             rts: false,
@@ -189,8 +182,7 @@ where
             usb_to_uart_consumer,
 
             write_state: WriteState::NotFull,
-            uart_rx,
-            uart_tx,
+            uart,
         }
     }
 
@@ -279,7 +271,7 @@ where
             Ok(grant) => {
                 // The buffer returned is guaranteed to have at least one byte
                 // write() clears the TXC flag if it's set
-                match self.uart_tx.write(grant.buf()[0]) { // '+'
+                match self.uart.write(grant.buf()[0]) { // '+'
                     Ok(()) => {
                         grant.release(1);
                     }
@@ -293,7 +285,7 @@ where
             }
             Err(BBError::InsufficientSize) => {
                 // There's no more data in the buffer to write
-                self.uart_tx.flush(); // Clears the TXC flag if it's set
+                self.uart.clear_flags(Flags::TXC);
             }
             Err(BBError::GrantInProgress) => {
                 // We'll hit this when the USB or UART ISR interrupts the other;
@@ -309,7 +301,7 @@ where
     pub fn uart_callback(&mut self) {
         match self.uart_to_usb_producer.grant_exact(1) {
             Ok(mut grant) => {
-                match self.uart_rx.read() {
+                match self.uart.read() {
                     Ok(c) => {
                         grant.buf()[0] = c;
                         grant.commit(1);
@@ -321,25 +313,25 @@ where
                     Err(nb::Error::Other(error)) => {
                         match error {
                             // TODO the CDC standard probably has a way to report these
-                            RxError::ParityError => {
+                            Error::ParityError => {
                                 defmt::error!("UART RX ParityError");
-                                self.uart_rx.clear_errors(RxStatus::PERR);
+                                self.uart.clear_status(Status::PERR);
                             }
-                            RxError::FrameError => {
+                            Error::FrameError => {
                                 defmt::error!("UART RX FrameError");
-                                self.uart_rx.clear_errors(RxStatus::FERR);
+                                self.uart.clear_status(Status::FERR);
                             }
-                            RxError::Overflow => {
+                            Error::Overflow => {
                                 defmt::error!("UART RX Overflow");
-                                self.uart_rx.clear_errors(RxStatus::BUFOVF);
+                                self.uart.clear_status(Status::BUFOVF);
                             }
-                            RxError::InconsistentSyncField => {
+                            Error::InconsistentSyncField => {
                                 defmt::error!("UART RX InconsistentSyncField");
-                                self.uart_rx.clear_errors(RxStatus::ISF);
+                                self.uart.clear_status(Status::ISF);
                             }
-                            RxError::CollisionDetected => {
+                            Error::CollisionDetected => {
                                 defmt::error!("UART RX CollisionDetected");
-                                self.uart_rx.clear_errors(RxStatus::COLL);
+                                self.uart.clear_status(Status::COLL);
                             }
                         } 
                     }
@@ -356,11 +348,10 @@ where
     }
 }
 
-impl<B, C, const ENDPOINT_SIZE: usize> UsbClass<B> for SerialPort<'_, B, C, ENDPOINT_SIZE>
+impl<B, P, const ENDPOINT_SIZE: usize> UsbClass<B> for SerialPort<'_, B, P, ENDPOINT_SIZE>
 where
     B: UsbBus,
-    C: uart::ValidConfig<Word = u8>,
-    C::Pads: Rx + Tx + TxOrRx,
+    P: ValidPads<Capability = Duplex>,
 {
     fn get_configuration_descriptors(&self, writer: &mut DescriptorWriter) -> Result<()> {
         writer.iad(
@@ -474,8 +465,8 @@ where
 
     fn control_in(&mut self, xfer: ControlIn<B>) {
         let req = xfer.request();
-        defmt::info!("USB-UART control_in() type:{:?} recipient:{:?} index:{:?}",
-                     req.request_type as usize, req.recipient as usize, req.index);
+        // defmt::info!("USB-UART control_in() type:{:?} recipient:{:?} index:{:?}",
+        //              req.request_type as usize, req.recipient as usize, req.index);
 
         if !(req.request_type == control::RequestType::Class
             && req.recipient == control::Recipient::Interface
@@ -483,8 +474,6 @@ where
         {
             return;
         }
-
-        defmt::info!("USB-UART control_in()");
 
         match req.request {
             REQ_GET_LINE_CODING if req.length == 7 => {
@@ -519,8 +508,6 @@ where
             return;
         }
 
-        defmt::info!("USB-UART control_out()");
-
         match req.request {
             REQ_SEND_ENCAPSULATED_COMMAND => {
                 defmt::info!("REQ_SEND_ENCAPSULATED_COMMAND"); // TODO
@@ -535,6 +522,7 @@ where
                 // TODO accept/reject based on whether we can handle the new coding
 
                 let new_baud = u32::from_le_bytes(xfer.data()[0..4].try_into().unwrap());
+                defmt::warn!("TODO change baud to {:?}", new_baud);
                 // if (new_baud != self.line_coding.data_rate) {
                 //     (self.uart_rx, self.uart_tx).reconfigure(|c|
                 //         c.baud(Hertz(new_baud), uart::BaudMode::Arithmetic(uart::Oversampling::Bits16)));
