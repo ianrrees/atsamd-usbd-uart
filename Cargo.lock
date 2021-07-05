@@ -41,12 +41,13 @@ dependencies = [
  "replace_with",
  "seq-macro",
  "typenum",
+ "usb-device",
  "vcell",
  "void",
 ]
 
 [[package]]
-name = "atsamd-usb-uart"
+name = "atsamd-usbd-uart"
 version = "0.1.0"
 dependencies = [
  "atsamd-hal",

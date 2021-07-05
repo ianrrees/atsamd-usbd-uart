@@ -1,8 +1,8 @@
 [package]
-name = "atsamd-usb-uart"
+name = "atsamd-usbd-uart"
 version = "0.1.0"
 authors = ["Ian Rees <code@ianrees.nz>"]
-keywords = ["no-std", "arm", "cortex-m", "embedded-hal"]
+keywords = ["no-std", "arm", "cortex-m", "atsamd", "usb", "embedded-hal"]
 edition = "2018"
 
 [dependencies]
@@ -20,18 +20,10 @@ defmt-rtt = "0.2.0"
 usb-device = "0.2.7"
 
 [dependencies.atsamd-hal]
-# Under-development version
-# default-features = false
+# TODO specify as a minimum version of atsamd-hal once the UARTv2 PR is merged
 git = "https://github.com/ianrrees/atsamd"
 branch = "for-work"
-# path = '/home/irees/Projects/20201112 - atsamd-rs/hal'
-# features = [
-#     "dma", # Support for the DMAC
-#     "samd21g", # Need to tell HAL which chip we're targeting
-#     "unproven", # Required to read GPIO pins, AFAIK nothing else
-#     "usb", # Build in USB support
-#     "samd21g-rt",
-# ]
+features = ["usb"]
 
 [features]
 default = [
