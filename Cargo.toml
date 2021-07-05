@@ -22,9 +22,16 @@ usb-device = "0.2.7"
 [dependencies.atsamd-hal]
 # Under-development version
 default-features = false
-# git = "https://github.com/ianrrees/atsamd"
-# branch = "for-work"
-path = '/home/irees/Projects/20201112 - atsamd-rs/hal'
+git = "https://github.com/ianrrees/atsamd"
+branch = "for-work"
+# path = '/home/irees/Projects/20201112 - atsamd-rs/hal'
+features = [
+    "dma", # Support for the DMAC
+    "samd21g", # Need to tell HAL which chip we're targeting
+    "unproven", # Required to read GPIO pins, AFAIK nothing else
+    "usb", # Build in USB support
+    "samd21g-rt",
+]
 
 [features]
 default = [
