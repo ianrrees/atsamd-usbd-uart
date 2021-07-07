@@ -64,21 +64,21 @@ impl Default for LineCoding {
 
 const BAUDMODE: BaudMode = BaudMode::Arithmetic(uart::Oversampling::Bits16);
 
-/// TX and RX buffers used by the SerialPort
+/// TX and RX buffers used by the UsbUart
 ///
 /// Due to the BBQueue API, combined with Rust's rules about structs that
 /// contain references to other members in the struct, we need a separate struct
 /// to contain the BBQueue storage.  This structure should never be moved in
 /// memory once it's in use, because any outstanding grant from before the move
 /// would point to memory which is no longer inside the buffer.
-pub struct SerialPortStorage {
+pub struct UsbUartStorage {
     /// For data from the UART to the USB; from the DCE to DTE, device to host
     rx_buffer: BBBuffer<U256>,
     /// Other direction from `rx_buffer`
     tx_buffer: BBBuffer<U256>,
 }
 
-impl SerialPortStorage {
+impl UsbUartStorage {
     pub fn new() -> Self {
         Self {
             rx_buffer: BBBuffer::new(),
@@ -88,7 +88,7 @@ impl SerialPortStorage {
 }
 
 /// A USB CDC to hardware UART serial port
-pub struct SerialPort<'a, B, P, const ENDPOINT_SIZE: usize>
+pub struct UsbUart<'a, B, P, const ENDPOINT_SIZE: usize>
 where
     B: UsbBus,
     P: ValidPads<Capability = Duplex>,
@@ -138,14 +138,14 @@ enum WriteState {
     Full(usize),
 }
 
-impl<'a, B, P, const ENDPOINT_SIZE: usize> SerialPort<'a, B, P, ENDPOINT_SIZE>
+impl<'a, B, P, const ENDPOINT_SIZE: usize> UsbUart<'a, B, P, ENDPOINT_SIZE>
 where
     B: UsbBus,
     P: ValidPads<Capability = Duplex>,
 {
     pub fn new(
         alloc: &'a UsbBusAllocator<B>,
-        storage: &'a SerialPortStorage,
+        storage: &'a UsbUartStorage,
         uart_hardware: Config<P, EightBit>,
     ) -> Self {
         let (uart_to_usb_producer, uart_to_usb_consumer) = storage.rx_buffer.try_split().unwrap();
@@ -343,7 +343,7 @@ where
     }
 }
 
-impl<B, P, const ENDPOINT_SIZE: usize> UsbClass<B> for SerialPort<'_, B, P, ENDPOINT_SIZE>
+impl<B, P, const ENDPOINT_SIZE: usize> UsbClass<B> for UsbUart<'_, B, P, ENDPOINT_SIZE>
 where
     B: UsbBus,
     P: ValidPads<Capability = Duplex>,
