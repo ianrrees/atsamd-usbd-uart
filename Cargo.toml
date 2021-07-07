@@ -21,8 +21,6 @@ usb-device = "0.2.7"
 
 [dependencies.atsamd-hal]
 # TODO specify as a minimum version of atsamd-hal once the UARTv2 PR is merged
-git = "https://github.com/ianrrees/atsamd"
-branch = "for-work"
 features = ["usb"]
 
 [features]
