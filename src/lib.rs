@@ -420,8 +420,11 @@ where
         self.write_state = WriteState::NotFull;
     }
 
-    fn poll(&mut self) {
-        // See if the host has more data to send over the UART
+    fn endpoint_out(&mut self, addr: EndpointAddress) {
+        if addr != self.read_ep.address() {
+            return;
+        }
+
         match self.usb_to_uart_producer.grant_exact(ENDPOINT_SIZE) {
             Ok(mut grant) => {
                 match self.read_ep.read(grant.buf()) {
@@ -450,7 +453,9 @@ where
                 self.flush_uart(); // Ensure we continue draining the buffer
             }
         }
+    }
 
+    fn poll(&mut self) {
         self.flush_usb();
     }
 
