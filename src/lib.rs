@@ -110,6 +110,10 @@ where
     uart_to_usb_consumer: Consumer<'a, U256>,
 
     /// USB end of the USB->UART buffer
+    ///
+    /// Whenever data is committed, the UART DRE interrupt should be enabled to
+    /// trigger writing the data to the SERCOM.  When the ISR is run and there
+    /// isn't more data to send, the ISR disables DRE.
     usb_to_uart_producer: Producer<'a, U256>,
 
     /// UART end of the USB->UART buffer
@@ -158,7 +162,6 @@ where
             .enable();
 
         uart.enable_interrupts(Flags::RXC);
-        uart.enable_interrupts(Flags::TXC);
 
         Self {
             comm_if: alloc.interface(),
@@ -257,42 +260,17 @@ where
         }
     }
 
-    // TODO perhaps a better name
-    /// Attempts to write a byte out to the UART
-    fn flush_uart(&mut self) {
-        // Try to send the next available byte
-        match self.usb_to_uart_consumer.read() {
-            Ok(grant) => {
-                // The buffer returned is guaranteed to have at least one byte
-                // write() clears the TXC flag if it's set
-                match self.uart.write(grant.buf()[0]) {
-                    // '+'
-                    Ok(()) => {
-                        grant.release(1);
-                    }
-                    Err(nb::Error::WouldBlock) => {
-                        // UART isn't ready for the next byte
-                    }
-                    Err(_) => {
-                        defmt::error!("error in flush_uart()"); // TODO
-                    }
-                };
-            }
-            Err(BBError::InsufficientSize) => {
-                // There's no more data in the buffer to write
-                self.uart.clear_flags(Flags::TXC);
-            }
-            Err(BBError::GrantInProgress) => {
-                // We'll hit this when the USB or UART ISR interrupts the other;
-                // it's effectively a mutex that protects the uart_tx
-            }
-            Err(BBError::AlreadySplit) => {
-                unreachable!();
-            }
-        }
-    }
-
     // TODO split this in to another struct so users don't need two ISRs that both reference Self
+    /// Called from the appropriate SERCOM ISR
+    ///
+    /// This *must* be run in a higher-priority (lower number) ISR, than the
+    /// level that services the USB.  The issue is that in this method, we
+    /// non-atomically try to read from `usb_to_uart_consumer`, and if there  is
+    /// no more data to write, we then disable the TX DRE interrupt.  The USB
+    /// OUT handler enables that interrupt when it receives data to begin
+    /// sending over the UART.  If the UART ISR were interrupted just before
+    /// disabling the interrupt, by the USB ISR setting the interrupt, then TX
+    /// could stall indefinitely.
     pub fn uart_callback(&mut self) {
         match self.uart_to_usb_producer.grant_exact(1) {
             Ok(mut grant) => {
@@ -307,7 +285,6 @@ where
                     }
                     Err(nb::Error::Other(error)) => {
                         match error {
-                            // TODO the CDC standard probably has a way to report these
                             Error::ParityError => {
                                 defmt::error!("UART RX ParityError");
                                 self.uart.clear_status(Status::PERR);
@@ -339,7 +316,30 @@ where
             }
         }
 
-        self.flush_uart();
+        if self.uart.read_flags().contains(Flags::DRE) {
+            match self.usb_to_uart_consumer.read() {
+                Ok(grant) => {
+                    // The buffer is guaranteed to have at least one byte
+                    match self.uart.write(grant.buf()[0]) {
+                        Ok(()) => {
+                            grant.release(1);
+                        }
+                        Err(_) => {
+                            // "Impossible" because we confirmed DRE is set
+                            // before calling write().
+                            defmt::error!("Impossible error in uart_callback()");
+                        }
+                    };
+                }
+                Err(BBError::InsufficientSize) => {
+                    // There's no more data in the buffer to write
+                    self.uart.disable_interrupts(Flags::DRE);
+                }
+                Err(BBError::AlreadySplit) | Err(BBError::GrantInProgress) => {
+                    unreachable!();
+                }
+            }
+        }
     }
 }
 
@@ -431,7 +431,7 @@ where
                     Ok(count) => {
                         grant.commit(count);
                         // TODO note this is only reliable if the UART ISR is higher prio than USB; may be better to put that flag back...
-                        self.flush_uart(); // NOP if the UART is already busy
+                        self.uart.enable_interrupts(Flags::DRE);
                     }
                     Err(UsbError::WouldBlock) => {
                         // No data to read, just drop the grant
@@ -449,8 +449,6 @@ where
                 // we eventually read.  In the meantime, clear interrupt flags
                 // in the USB endpoint hardware with an empty read:
                 let _ = self.read_ep.read(&mut []);
-
-                self.flush_uart(); // Ensure we continue draining the buffer
             }
         }
     }
