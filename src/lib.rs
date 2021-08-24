@@ -45,6 +45,15 @@ const REQ_SET_LINE_CODING: u8 = 0x20;
 const REQ_GET_LINE_CODING: u8 = 0x21;
 const REQ_SET_CONTROL_LINE_STATE: u8 = 0x22;
 
+const CDC_NOTIFICATION_REQ_TYPE: u8 = 0xA1;
+const CDC_SERIAL_STATE_NOTIFICATION: u8 = 0x20;
+
+// USB CDC Class, PSTN SubClass, 6.5.4.  Using u8 instead of u16, because that
+// makes bbqueue a better fit, and this seems highly unlikely to change
+const CDC_SERIAL_STATE_OVER_RUN: u8 = 1 << 6;
+const CDC_SERIAL_STATE_PARITY_ERROR: u8 = 1 << 5;
+const CDC_SERIAL_STATE_FRAMING_ERROR: u8 = 1 << 4;
+
 // TODO Only need this because we can't read settings back out of the Uart
 struct LineCoding {
     stop_bits: StopBits,
@@ -76,6 +85,8 @@ pub struct UsbUartStorage {
     rx_buffer: BBBuffer<U256>,
     /// Other direction from `rx_buffer`
     tx_buffer: BBBuffer<U256>,
+    /// For reporting Overflow/Parity/Framing errors, size is arbitrary
+    error_buffer: BBBuffer<U16>,
 }
 
 impl UsbUartStorage {
@@ -83,6 +94,7 @@ impl UsbUartStorage {
         Self {
             rx_buffer: BBBuffer::new(),
             tx_buffer: BBBuffer::new(),
+            error_buffer: BBBuffer::new(),
         }
     }
 }
@@ -119,6 +131,12 @@ where
     /// UART end of the USB->UART buffer
     usb_to_uart_consumer: Consumer<'a, U256>,
 
+    /// UART end of the error queue
+    error_producer: Producer<'a, U16>,
+ 
+    /// USB end of the error queue
+    error_consumer: Consumer<'a, U16>,
+
     write_state: WriteState,
 
     /// The enabled UART hardware
@@ -154,6 +172,7 @@ where
     ) -> Self {
         let (uart_to_usb_producer, uart_to_usb_consumer) = storage.rx_buffer.try_split().unwrap();
         let (usb_to_uart_producer, usb_to_uart_consumer) = storage.tx_buffer.try_split().unwrap();
+        let (error_producer, error_consumer) = storage.error_buffer.try_split().unwrap();
 
         let mut uart = uart_hardware
             .baud(Hertz(LineCoding::default().baud), BAUDMODE)
@@ -165,7 +184,8 @@ where
 
         Self {
             comm_if: alloc.interface(),
-            comm_ep: alloc.interrupt(8, 255),
+            // Need 10B for SerialState transfers, hardware does 8B, 16B, 32B...
+            comm_ep: alloc.interrupt(16, 255),
             data_if: alloc.interface(),
             read_ep: alloc.bulk(ENDPOINT_SIZE as u16),
             write_ep: alloc.bulk(ENDPOINT_SIZE as u16),
@@ -177,14 +197,46 @@ where
             uart_to_usb_consumer,
             usb_to_uart_producer,
             usb_to_uart_consumer,
+            error_producer,
+            error_consumer,
 
             write_state: WriteState::NotFull,
             uart,
         }
     }
-
+    
     // TODO perhaps a better name
     pub fn flush_usb(&mut self) {
+        match self.error_consumer.read() {
+            Ok(grant) => {
+                let mut buf = [0; 10];
+                buf[0] = CDC_NOTIFICATION_REQ_TYPE; // bmRequestType
+                buf[1] = CDC_SERIAL_STATE_NOTIFICATION; // bNotification
+                buf[4] = u8::from(self.comm_if); // wIndex
+                buf[6] = 2; // wLength
+                // Data (grant is guaranteed to have at least one byte)
+                buf[8] = grant.buf()[0];
+            
+                match self.comm_ep.write(&buf) {
+                    Ok(count) => {
+                        if count != buf.len() {
+                            defmt::warn!("Write of serial state had unexpected length {:?}", count);
+                        }
+                        grant.release(1);
+                    }
+                    Err(UsbError::WouldBlock) => {}
+                    Err(_) => {
+                        defmt::info!("Error writing Serial State");
+                    }
+                }
+            }
+            Err(BBError::InsufficientSize) => {
+                // No errors, yay!
+            }
+            Err(_) => {
+                defmt::error!("Couldn't get error_consumer grant");
+            }
+        }
         match self.uart_to_usb_consumer.read() {
             // There is more data to write
             Ok(grant) => {
@@ -260,6 +312,22 @@ where
         }
     }
 
+    /// Best effort at reporting the error code
+    ///
+    /// These wind up being reported as bit flags in interrupt transfers, so
+    /// there isn't a lot of bandwidth available and we could get a lot of
+    /// errors thrown, for instance if the baud rate is set incorrectly.
+    fn enqueue_error(&mut self, error_code: u8) {
+        match self.error_producer.grant_exact(1) {
+            Ok(mut grant) => {
+                grant.buf()[0] = error_code;
+                grant.commit(1);
+            }
+            Err(_) => {
+                defmt::error!("Failed to enqueue error (code {:?})", error_code);
+            }
+        }
+    }
     // TODO split this in to another struct so users don't need two ISRs that both reference Self
     /// Called from the appropriate SERCOM ISR
     ///
@@ -286,22 +354,24 @@ where
                     Err(nb::Error::Other(error)) => {
                         match error {
                             Error::ParityError => {
-                                defmt::error!("UART RX ParityError");
                                 self.uart.clear_status(Status::PERR);
+                                self.enqueue_error(CDC_SERIAL_STATE_PARITY_ERROR);
                             }
                             Error::FrameError => {
-                                defmt::error!("UART RX FrameError");
                                 self.uart.clear_status(Status::FERR);
+                                self.enqueue_error(CDC_SERIAL_STATE_FRAMING_ERROR);
                             }
                             Error::Overflow => {
-                                defmt::error!("UART RX Overflow");
                                 self.uart.clear_status(Status::BUFOVF);
+                                self.enqueue_error(CDC_SERIAL_STATE_OVER_RUN);
                             }
                             Error::InconsistentSyncField => {
+                                // This can happen if using auto-baud; we don't
                                 defmt::error!("UART RX InconsistentSyncField");
                                 self.uart.clear_status(Status::ISF);
                             }
                             Error::CollisionDetected => {
+                                // Requires enabling collision detection
                                 defmt::error!("UART RX CollisionDetected");
                                 self.uart.clear_status(Status::COLL);
                             }
@@ -312,6 +382,8 @@ where
 
             Err(BBError::InsufficientSize) => {
                 defmt::error!("uart_to_usb overflow");
+                self.enqueue_error(CDC_SERIAL_STATE_OVER_RUN);
+
                  // RXC will be re-enabled when there's space in the buffer.
                  // Don't want to read from the SERCOM, in case it's using
                  // hardware flow control and doesn't need to discard data.
