@@ -214,19 +214,22 @@ where
                         // the data was read by the host.
                         grant.release(count);
 
+                        // NOP normally, but re-enables the interrupts if the
+                        // buffer filled up.  Not racy, because the SERCOM ISR
+                        // has to be higher priority than the USB one we're in.
+                        self.uart.enable_interrupts(Flags::RXC);
+
                         self.write_state = if count >= ENDPOINT_SIZE {
                             WriteState::Full(full_packet_count + 1)
                         } else {
                             WriteState::NotFull
                         };
-                        // Ok(())
                     }
 
                     Err(UsbError::WouldBlock) => {}
 
                     Err(_) => {
                         defmt::error!("Error writing packet")
-                        // Err(e)
                     }
                 }
             }
@@ -248,14 +251,11 @@ where
                 } else {
                     self.write_state = WriteState::NotFull;
                 }
-
-                // Ok(())
             }
 
             Err(_) => {
                 // TODO handle this better
                 defmt::error!("Couldn't get uart_to_usb_consumer grant");
-                // Ok(())
             }
         }
     }
@@ -308,6 +308,14 @@ where
                         }
                     }
                 }
+            }
+
+            Err(BBError::InsufficientSize) => {
+                defmt::error!("uart_to_usb overflow");
+                 // RXC will be re-enabled when there's space in the buffer.
+                 // Don't want to read from the SERCOM, in case it's using
+                 // hardware flow control and doesn't need to discard data.
+                self.uart.disable_interrupts(Flags::RXC);
             }
 
             Err(_) => {
