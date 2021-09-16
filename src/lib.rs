@@ -111,9 +111,12 @@ where
     read_ep: EndpointOut<'a, B>,
     write_ep: EndpointIn<'a, B>,
     line_coding: LineCoding,
-    // TODO what to do about these?
-    dtr: bool,
-    rts: bool,
+
+    /// User-supplied callback, when the USB host sets/clears DTR
+    dtr_callback: Option<fn(bool)>,
+
+    /// User-supplied callback, when the USB host sets/clears RTS
+    rts_callback: Option<fn(bool)>,
 
     /// UART end of the UART->USB buffer
     uart_to_usb_producer: Producer<'a, U256>,
@@ -169,6 +172,8 @@ where
         alloc: &'a UsbBusAllocator<B>,
         storage: &'a UsbUartStorage,
         uart_hardware: Config<P, EightBit>,
+        dtr_callback: Option<fn(bool)>,
+        rts_callback: Option<fn(bool)>,
     ) -> Self {
         let (uart_to_usb_producer, uart_to_usb_consumer) = storage.rx_buffer.try_split().unwrap();
         let (usb_to_uart_producer, usb_to_uart_consumer) = storage.tx_buffer.try_split().unwrap();
@@ -190,8 +195,9 @@ where
             read_ep: alloc.bulk(ENDPOINT_SIZE as u16),
             write_ep: alloc.bulk(ENDPOINT_SIZE as u16),
             line_coding: LineCoding::default(),
-            dtr: false,
-            rts: false,
+
+            dtr_callback,
+            rts_callback,
 
             uart_to_usb_producer,
             uart_to_usb_consumer,
@@ -491,8 +497,6 @@ where
 
     fn reset(&mut self) {
         self.line_coding = LineCoding::default();
-        self.dtr = false;
-        self.rts = false;
 
         // TODO
         // self.read_buf.clear();
@@ -662,8 +666,13 @@ where
 
             REQ_SET_CONTROL_LINE_STATE => {
                 defmt::info!("REQ_SET_CONTROL_LINE_STATE"); // TODO
-                self.dtr = (req.value & 0x0001) != 0;
-                self.rts = (req.value & 0x0002) != 0;
+                if let Some(dtr_callback) = &self.dtr_callback {
+                    dtr_callback((req.value & 0x0001) != 0);
+                }
+
+                if let Some(rts_callback) = &self.rts_callback {
+                    rts_callback((req.value & 0x0002) != 0);
+                }
 
                 xfer.accept().unwrap_or_else(|_| {
                     defmt::error!("USB-UART Failed to accept REQ_SET_CONTROL_LINE_STATE")
