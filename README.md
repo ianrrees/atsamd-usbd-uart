@@ -6,6 +6,5 @@ Only supports 8 bit character size.
 ## TODO
 - Update dependency on atsamd-rs to current
 - Make an example file
-- Add ability to use a GPIO pin for DTR
 - Use DMA to feed the SERCOM, this ISR-based approach only gets about 50% of
   theoretical throughput
