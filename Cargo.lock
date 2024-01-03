@@ -25,20 +25,19 @@ dependencies = [
 
 [[package]]
 name = "atsamd-hal"
-version = "0.12.0"
-source = "git+https://github.com/ianrrees/atsamd?branch=for-work#3f22ea42a2cece56c03d0f2e89306b2697fb67d1"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7fa9bf0e17eb4d4120c5d14ba09c24c066299b6efe957d31dd4aa64c03c89b75"
 dependencies = [
  "bitfield",
  "bitflags",
- "cortex-m 0.6.7",
- "embedded-dma",
+ "cortex-m 0.7.3",
  "embedded-hal",
  "modular-bitfield",
- "nb 0.1.3",
+ "nb 1.0.0",
  "num-traits",
  "paste",
  "rand_core",
- "replace_with",
  "seq-macro",
  "typenum",
  "usb-device",
@@ -48,13 +47,12 @@ dependencies = [
 
 [[package]]
 name = "atsamd-usbd-uart"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "atsamd-hal",
  "bbqueue",
  "cortex-m 0.6.7",
  "defmt",
- "defmt-rtt",
  "usb-device",
 ]
 
@@ -122,21 +120,22 @@ dependencies = [
 
 [[package]]
 name = "defmt"
-version = "0.2.3"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15fe96f5d208164afa70583ff8f062e7697cbbb0b98e5076fbf8ac6da9edff0f"
+checksum = "9252abe43d4c0a5df0c5c865129fa8daad338bb33357ba40023a37cd34b4a7b9"
 dependencies = [
+ "bitflags",
  "defmt-macros",
- "semver 1.0.3",
 ]
 
 [[package]]
 name = "defmt-macros"
-version = "0.2.3"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9bd2c3949cb76c25f48c363e61b97f05b317efe3c12fa45d54a6599c3949c85e"
+checksum = "6d944432e281084511691b36e5e9c794c19c33675822c9019e3b64f5b89e10da"
 dependencies = [
  "defmt-parser",
+ "proc-macro-error",
  "proc-macro2",
  "quote",
  "syn",
@@ -144,28 +143,9 @@ dependencies = [
 
 [[package]]
 name = "defmt-parser"
-version = "0.2.2"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc621c2b4f5f5635e34021c38af2ccb0c1dae38ba11ebee25258de8bb1cee9fe"
-
-[[package]]
-name = "defmt-rtt"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5dfca43cd6b33d2d9f4db9757101ce1044e9672cd7f412dfcc5c5f772243c3b"
-dependencies = [
- "cortex-m 0.6.7",
- "defmt",
-]
-
-[[package]]
-name = "embedded-dma"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46c8c02e4347a0267ca60813c952017f4c5948c232474c6010a381a337f1bda4"
-dependencies = [
- "stable_deref_trait",
-]
+checksum = "0db23d29972d99baa3de2ee2ae3f104c10564a6d05a346eb3f4c4f2c0525a06e"
 
 [[package]]
 name = "embedded-hal"
@@ -257,6 +237,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "acbf547ad0c65e31259204bd90935776d1c693cec2f4ff7abb7a1bbbd40dfe58"
 
 [[package]]
+name = "proc-macro-error"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da25490ff9892aab3fcf7c36f08cfb902dd3e71ca0f9f9517bea02a73a5ce38c"
+dependencies = [
+ "proc-macro-error-attr",
+ "proc-macro2",
+ "quote",
+ "syn",
+ "version_check",
+]
+
+[[package]]
+name = "proc-macro-error-attr"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1be40180e52ecc98ad80b184934baf3d0d29f979574e439af5a55274b35f869"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "version_check",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -276,15 +280,9 @@ dependencies = [
 
 [[package]]
 name = "rand_core"
-version = "0.5.1"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90bde5296fc891b0cef12a6d03ddccc162ce7b2aff54160af9338f8d40df6d19"
-
-[[package]]
-name = "replace_with"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3a8614ee435691de62bcffcf4a66d91b3594bf1428a5722e79103249a095690"
+checksum = "d34f1408f55294453790c48b2f1ebbb1c5b4b7563eb1f418bcfcfdbb06ebb4e7"
 
 [[package]]
 name = "rustc_version"
@@ -292,7 +290,7 @@ version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "138e3e0acb6c9fb258b19b67cb8abd63c00679d2851805ea151465464fe9030a"
 dependencies = [
- "semver 0.9.0",
+ "semver",
 ]
 
 [[package]]
@@ -305,12 +303,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "semver"
-version = "1.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f3aac57ee7f3272d8395c6e4f502f434f0e289fcd62876f70daa008c20dcabe"
-
-[[package]]
 name = "semver-parser"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -318,9 +310,9 @@ checksum = "388a1df253eca08550bef6c72392cfe7c30914bf41df5269b68cbd6ff8f570a3"
 
 [[package]]
 name = "seq-macro"
-version = "0.2.2"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a9f47faea3cad316faa914d013d24f471cd90bfca1a0c70f05a3f42c6441e99"
+checksum = "70d9841243dbc9928f5fed7946d2862292eebd823d96e13e556924d3db0120d2"
 
 [[package]]
 name = "stable_deref_trait"

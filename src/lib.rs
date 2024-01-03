@@ -1,7 +1,6 @@
 #![no_std]
 
 extern crate atsamd_hal;
-extern crate defmt_rtt;
 
 use atsamd_hal::{
     hal::serial::{
