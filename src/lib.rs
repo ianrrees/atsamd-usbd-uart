@@ -1,19 +1,15 @@
 #![no_std]
 
-extern crate atsamd_hal;
-
 use atsamd_hal::{
-    hal::serial::{
-        // embedded_hal serial traits
+    ehal::serial::{
         Read,
         Write,
     },
     prelude::*,
-    sercom::v2::uart::{
+    sercom::uart::{
         self, BaudMode, Config, Duplex, EightBit, Error, Flags, Parity, Status, StopBits, Uart,
         ValidPads,
     },
-    time::Hertz,
 };
 
 // TODO use const generics, so our customers don't need to see this
@@ -56,7 +52,7 @@ const CDC_SERIAL_STATE_FRAMING_ERROR: u8 = 1 << 4;
 // TODO Only need this because we can't read settings back out of the Uart
 struct LineCoding {
     stop_bits: StopBits,
-    parity: Option<Parity>,
+    parity: Parity,
     baud: u32,
 }
 
@@ -64,7 +60,7 @@ impl Default for LineCoding {
     fn default() -> Self {
         LineCoding {
             stop_bits: StopBits::OneBit,
-            parity: None,
+            parity: Parity::None,
             baud: 115200,
         }
     }
@@ -179,8 +175,8 @@ where
         let (error_producer, error_consumer) = storage.error_buffer.try_split().unwrap();
 
         let mut uart = uart_hardware
-            .baud(Hertz(LineCoding::default().baud), BAUDMODE)
-            .stop_bit(LineCoding::default().stop_bits)
+            .baud(LineCoding::default().baud.Hz(), BAUDMODE)
+            .stop_bits(LineCoding::default().stop_bits)
             .parity(LineCoding::default().parity)
             .enable();
 
@@ -440,6 +436,7 @@ where
             USB_CLASS_CDC,
             CDC_SUBCLASS_ACM,
             CDC_PROTOCOL_NONE,
+            None,
         )?;
 
         writer.interface(
@@ -563,9 +560,9 @@ where
                     data[0..4].copy_from_slice(&self.line_coding.baud.to_le_bytes());
                     data[4] = self.line_coding.stop_bits as u8;
                     data[5] = match self.line_coding.parity {
-                        None => 0,
-                        Some(Parity::Even) => 2,
-                        Some(Parity::Odd) => 1,
+                        Parity::None => 0,
+                        Parity::Even => 2,
+                        Parity::Odd => 1,
                     };
                     data[6] = 8;
 
@@ -611,9 +608,9 @@ where
                     _ => None,
                 };
                 let new_parity_type = match xfer.data()[5] {
-                    0 => Some(None),
-                    1 => Some(Some(Parity::Odd)),
-                    2 => Some(Some(Parity::Even)),
+                    0 => Some(Parity::None),
+                    1 => Some(Parity::Odd),
+                    2 => Some(Parity::Even),
                     // 3 means Mark, unsupported by hardware
                     // 4 means Space, unsupported by hardware
                     _ => None,
@@ -642,10 +639,10 @@ where
                 } else {
                     // New config is valid, so apply it
                     // TODO split this out in to a separate method, and use that when we're reset
-                    self.uart.reconfigure(|c| {
-                        c.baud(Hertz(new_baud), BAUDMODE)
-                            .stop_bit(new_stop_bits.unwrap())
-                            .parity(new_parity_type.unwrap())
+                    self.uart.reconfigure(|config| {
+                        config.set_baud(new_baud.Hz(), BAUDMODE);
+                        config.set_stop_bits(new_stop_bits.unwrap());
+                        config.set_parity(new_parity_type.unwrap());
                     });
 
                     self.line_coding.baud = new_baud;

@@ -3,7 +3,7 @@ name = "atsamd-usbd-uart"
 version = "0.1.1"
 authors = ["Ian Rees <code@ianrees.nz>"]
 keywords = ["no-std", "arm", "cortex-m", "atsamd", "usb", "embedded-hal"]
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 # Using bbqueue because it gives a low-cost method to attempt a USB write,
@@ -15,8 +15,7 @@ cortex-m = "~0.6"
 
 defmt = "0.3"
 
-usb-device = "0.2.7"
+usb-device = "0.3.1"
 
 [dependencies.atsamd-hal]
-# TODO specify as a minimum version of atsamd-hal once the UARTv2 PR is merged
 features = ["usb"]
