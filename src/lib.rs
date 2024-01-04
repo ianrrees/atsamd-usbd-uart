@@ -1,10 +1,7 @@
 #![no_std]
 
 use atsamd_hal::{
-    ehal::serial::{
-        Read,
-        Write,
-    },
+    ehal::serial::{Read, Write},
     prelude::*,
     sercom::uart::{
         self, BaudMode, Config, Duplex, EightBit, Error, Flags, Parity, Status, StopBits, Uart,
@@ -131,7 +128,7 @@ where
 
     /// UART end of the error queue
     error_producer: Producer<'a, U16>,
- 
+
     /// USB end of the error queue
     error_consumer: Consumer<'a, U16>,
 
@@ -205,7 +202,7 @@ where
             uart,
         }
     }
-    
+
     // TODO perhaps a better name
     pub fn flush_usb(&mut self) {
         match self.error_consumer.read() {
@@ -215,9 +212,8 @@ where
                 buf[1] = CDC_SERIAL_STATE_NOTIFICATION; // bNotification
                 buf[4] = u8::from(self.comm_if); // wIndex
                 buf[6] = 2; // wLength
-                // Data (grant is guaranteed to have at least one byte)
-                buf[8] = grant.buf()[0];
-            
+                buf[8] = grant.buf()[0]; // Data (grant is guaranteed to have at least one byte)
+
                 match self.comm_ep.write(&buf) {
                     Ok(count) => {
                         if count != buf.len() {
@@ -385,9 +381,9 @@ where
                 defmt::error!("uart_to_usb overflow");
                 self.enqueue_error(CDC_SERIAL_STATE_OVER_RUN);
 
-                 // RXC will be re-enabled when there's space in the buffer.
-                 // Don't want to read from the SERCOM, in case it's using
-                 // hardware flow control and doesn't need to discard data.
+                // RXC will be re-enabled when there's space in the buffer.
+                // Don't want to read from the SERCOM, in case it's using
+                // hardware flow control and doesn't need to discard data.
                 self.uart.disable_interrupts(Flags::RXC);
             }
 
